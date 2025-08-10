@@ -2,7 +2,7 @@
 
 **An IoT solution for intelligent water pump control and tank level monitoring with energy consumption tracking — designed for residential and agricultural applications.**
 
-![Project Screenshot](https://screenshot1.jpg)
+![Project Screenshot](https://github.com/komkritc/PumpControlSystem/blob/master/images/screenshot1.jpg)
 
 ---
 
@@ -52,7 +52,7 @@
 - Calculates volume for different tank shapes  
 - ESP-NOW communication  
 - Web dashboard with live tank visualization
-
+![Project Screenshot](https://github.com/komkritc/PumpControlSystem/blob/master/images/screenshot_tank1.jpg)
 ---
 
 ## 📦 Hardware Requirements
