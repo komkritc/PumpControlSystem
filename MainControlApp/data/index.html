@@ -1,0 +1,1111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Water Pump Monitoring System 1.0</title>
+
+    <link rel="stylesheet" href="/css/all.min.css">
+
+    <style>
+        :root {
+            --primary: #2c3e50;
+            --secondary: #3498db;
+            --success: #27ae60;
+            --danger: #e74c3c;
+            --warning: #f39c12;
+            --dark: #34495e;
+            --light: #ecf0f1;
+            --gray: #95a5a6;
+            --card-shadow: 0 4px 12px rgba(0,0,0,0.08);
+            --border-radius: 12px;
+            --mobile-breakpoint: 768px;
+            --tablet-breakpoint: 1024px;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #f5f7fa;
+            color: #333;
+            line-height: 1.6;
+            padding: 20px;
+            min-height: 100vh;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: linear-gradient(135deg, var(--primary), var(--dark));
+            color: white;
+            padding: 15px 20px;
+            border-radius: var(--border-radius);
+            margin-bottom: 20px;
+            box-shadow: var(--card-shadow);
+            flex-wrap: wrap;
+            gap: 15px;
+        }
+
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            min-width: 0;
+        }
+
+        .logo-icon {
+            font-size: 1.8rem;
+            color: var(--secondary);
+            flex-shrink: 0;
+        }
+
+        .logo-text h1 {
+            font-weight: 600;
+            font-size: 1.5rem;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .logo-text p {
+            font-size: 0.85rem;
+            opacity: 0.8;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .system-status {
+            display: flex;
+            gap: 15px;
+            text-align: right;
+            flex-wrap: wrap;
+            justify-content: flex-end;
+        }
+
+        .status-item {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-end;
+            min-width: 100px;
+        }
+
+        .status-label {
+            font-size: 0.8rem;
+            opacity: 0.8;
+            margin-bottom: 4px;
+        }
+
+        .status-value {
+            font-weight: 600;
+            font-size: 1rem;
+        }
+
+        .dashboard-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 15px;
+            margin-bottom: 20px;
+            flex: 1;
+        }
+
+        .card {
+            background: white;
+            border-radius: var(--border-radius);
+            padding: 20px;
+            box-shadow: var(--card-shadow);
+            transition: transform 0.3s ease, box-shadow 0.3s ease;
+            display: flex;
+            flex-direction: column;
+        }
+
+            .card:hover {
+                transform: translateY(-5px);
+                box-shadow: 0 8px 16px rgba(0,0,0,0.12);
+            }
+
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+            padding-bottom: 12px;
+            border-bottom: 1px solid #eee;
+        }
+
+        .card-title {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 1.1rem;
+            font-weight: 600;
+            color: var(--primary);
+            min-width: 0;
+        }
+
+            .card-title h2 {
+                white-space: nowrap;
+                overflow: hidden;
+                text-overflow: ellipsis;
+            }
+
+            .card-title i {
+                color: var(--secondary);
+                flex-shrink: 0;
+            }
+
+        .sensor-card {
+            grid-column: span 1;
+        }
+
+        .water-level-indicator {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            margin: 15px 0;
+            flex: 1;
+            justify-content: center;
+        }
+
+        .water-level-values {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 12px;
+            width: 100%;
+            margin: 12px 0;
+        }
+
+        .water-level-item {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 12px;
+            background: #f8f9ff;
+            border-radius: 8px;
+            min-width: 0;
+        }
+
+        .water-level-value {
+            font-size: 1.5rem;
+            font-weight: 700;
+            color: var(--primary);
+            white-space: nowrap;
+        }
+
+        .water-level-label {
+            font-size: 0.85rem;
+            color: var(--gray);
+            margin-top: 5px;
+            text-align: center;
+        }
+
+        .level-gauge {
+            width: 100%;
+            height: 16px;
+            background: #e0e7ff;
+            border-radius: 8px;
+            overflow: hidden;
+            position: relative;
+        }
+
+        .level-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #3498db, #2980b9);
+            border-radius: 8px;
+            width: 45%;
+        }
+
+        .level-markers {
+            display: flex;
+            justify-content: space-between;
+            width: 100%;
+            margin-top: 6px;
+            color: var(--gray);
+            font-size: 0.8rem;
+        }
+
+        .energy-card {
+            grid-column: span 2;
+        }
+
+        .energy-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 12px;
+            flex: 1;
+        }
+
+        .energy-item {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 15px;
+            border-radius: 8px;
+            background: #f8f9ff;
+            min-width: 0;
+        }
+
+        .energy-icon {
+            font-size: 1.8rem;
+            margin-bottom: 12px;
+        }
+
+        .energy-label {
+            font-size: 0.9rem;
+            color: var(--gray);
+            margin-bottom: 6px;
+            text-align: center;
+        }
+
+        .energy-value {
+            font-size: 1.5rem;
+            font-weight: 700;
+            color: var(--primary);
+            white-space: nowrap;
+        }
+
+        .energy-unit {
+            font-size: 0.85rem;
+            color: var(--gray);
+            margin-top: 3px;
+        }
+
+        .reset-btn {
+            background: var(--light);
+            border: none;
+            padding: 10px;
+            border-radius: 8px;
+            font-weight: 600;
+            color: var(--dark);
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            margin-top: 15px;
+            transition: background 0.3s;
+            width: 100%;
+            font-size: 0.9rem;
+        }
+
+            .reset-btn:hover {
+                background: #e0e7ff;
+            }
+
+        .status-card {
+            grid-column: span 1;
+        }
+
+        .status-list {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            flex: 1;
+        }
+
+        .status-item-card {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 12px;
+            background: #f8f9ff;
+            border-radius: 8px;
+            min-width: 0;
+        }
+
+        .status-info {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            min-width: 0;
+        }
+
+        .status-icon {
+            width: 36px;
+            height: 36px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.1rem;
+            flex-shrink: 0;
+        }
+
+            .status-icon.blue {
+                background: #d6e4ff;
+                color: var(--secondary);
+            }
+
+            .status-icon.green {
+                background: #d1fae5;
+                color: var(--success);
+            }
+
+            .status-icon.orange {
+                background: #ffedd5;
+                color: var(--warning);
+            }
+
+        .status-text {
+            display: flex;
+            flex-direction: column;
+            min-width: 0;
+        }
+
+        .status-name {
+            font-weight: 500;
+            font-size: 0.95rem;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .status-desc {
+            font-size: 0.8rem;
+            color: var(--gray);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .status-value-card {
+            font-weight: 600;
+            font-size: 1rem;
+            white-space: nowrap;
+            margin-left: 10px;
+        }
+
+            .status-value-card.success {
+                color: #27ae60;
+            }
+
+            .status-value-card.danger {
+                color: #e74c3c;
+            }
+
+        .control-card {
+            grid-column: span 2;
+        }
+
+        .relay-control {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 20px 0;
+            flex: 1;
+            justify-content: center;
+        }
+
+        .relay-btn {
+            position: relative;
+            width: 150px;
+            height: 70px;
+            border-radius: 40px;
+            background: var(--danger);
+            border: none;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            padding: 6px;
+            transition: background 0.3s;
+            margin-bottom: 20px;
+            box-shadow: 0 6px 15px rgba(231, 76, 60, 0.3);
+        }
+
+            .relay-btn.on {
+                background: var(--success);
+                box-shadow: 0 6px 15px rgba(39, 174, 96, 0.3);
+            }
+
+        .relay-switch {
+            position: absolute;
+            width: 58px;
+            height: 58px;
+            border-radius: 50%;
+            background: white;
+            transition: transform 0.3s;
+            left: 6px;
+            box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+        }
+
+        .relay-btn.on .relay-switch {
+            transform: translateX(80px);
+        }
+
+        .relay-text {
+            font-size: 1.3rem;
+            font-weight: 600;
+            color: white;
+            position: absolute;
+            left: 70px;
+            user-select: none;
+        }
+
+        .relay-btn.on .relay-text {
+            left: 20px;
+        }
+
+        .control-actions {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+            margin-bottom: 20px;
+        }
+
+        .control-group {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .control-label {
+            font-weight: 500;
+            font-size: 0.95rem;
+            color: var(--primary);
+        }
+
+        .interval-select {
+            padding: 10px 12px;
+            border-radius: 8px;
+            border: 1px solid #ddd;
+            background: white;
+            font-size: 0.95rem;
+            width: 100%;
+        }
+
+        .action-btn {
+            padding: 10px;
+            border-radius: 8px;
+            border: none;
+            font-weight: 600;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            transition: all 0.2s;
+            font-size: 0.9rem;
+        }
+
+        .blue-btn {
+            background: var(--secondary);
+            color: white;
+        }
+
+            .blue-btn:hover {
+                background: #2980b9;
+            }
+
+        .gray-btn {
+            background: var(--light);
+            color: var(--dark);
+        }
+
+            .gray-btn:hover {
+                background: #d5dbdb;
+            }
+
+        .ota-card {
+            grid-column: span 2;
+            background: linear-gradient(135deg, #fff3cd, #fff9e6);
+            border: 1px solid #ffeeba;
+        }
+
+        .ota-header {
+            color: #856404;
+        }
+
+        .ota-content {
+            background: rgba(255, 255, 255, 0.6);
+            padding: 15px;
+            border-radius: 10px;
+            margin-top: 12px;
+            flex: 1;
+        }
+
+        .ota-info {
+            margin-bottom: 12px;
+            line-height: 1.6;
+        }
+
+        .ota-details {
+            background: white;
+            padding: 12px;
+            border-radius: 8px;
+            font-family: monospace;
+            margin: 15px 0;
+            border: 1px solid #eee;
+            font-size: 0.9rem;
+        }
+
+        .ota-step {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 10px 0;
+            border-bottom: 1px solid #f0f0f0;
+        }
+
+            .ota-step:last-child {
+                border-bottom: none;
+            }
+
+        .step-number {
+            width: 24px;
+            height: 24px;
+            background: var(--warning);
+            color: white;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 600;
+            flex-shrink: 0;
+            font-size: 0.9rem;
+        }
+
+        .footer {
+            text-align: center;
+            padding: 15px;
+            color: var(--gray);
+            font-size: 0.85rem;
+            margin-top: auto;
+        }
+
+        input[type="number"] {
+            width: 100%;
+            padding: 8px 10px;
+            border-radius: 6px;
+            border: 1px solid #ddd;
+            font-size: 0.95rem;
+        }
+
+        /* Responsive adjustments */
+        @media (max-width: 1200px) {
+            .dashboard-grid {
+                grid-template-columns: repeat(3, 1fr);
+            }
+
+            .energy-card, .ota-card, .control-card {
+                grid-column: span 3;
+            }
+        }
+
+        @media (max-width: 1024px) {
+            .dashboard-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+
+            .energy-card, .ota-card, .control-card {
+                grid-column: span 2;
+            }
+        }
+
+        @media (max-width: 768px) {
+            .dashboard-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .energy-card, .ota-card, .control-card {
+                grid-column: span 1;
+            }
+
+            .header {
+                flex-direction: column;
+                text-align: center;
+                gap: 12px;
+            }
+
+            .system-status {
+                width: 100%;
+                justify-content: space-around;
+                text-align: center;
+            }
+
+            .status-item {
+                align-items: center;
+            }
+
+            .energy-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .control-actions {
+                grid-template-columns: 1fr;
+            }
+
+            .water-level-values {
+                grid-template-columns: 1fr;
+            }
+
+            .card {
+                padding: 15px;
+            }
+
+            .relay-btn {
+                width: 130px;
+                height: 60px;
+            }
+
+            .relay-switch {
+                width: 50px;
+                height: 50px;
+            }
+
+            .relay-btn.on .relay-switch {
+                transform: translateX(65px);
+            }
+
+            .relay-text {
+                font-size: 1.1rem;
+                left: 60px;
+            }
+
+            .relay-btn.on .relay-text {
+                left: 15px;
+            }
+        }
+
+        @media (max-width: 480px) {
+            body {
+                padding: 12px;
+            }
+
+            .logo-text h1 {
+                font-size: 1.3rem;
+            }
+
+            .card-title {
+                font-size: 1rem;
+            }
+
+            .water-level-value {
+                font-size: 1.3rem;
+            }
+
+            .energy-value {
+                font-size: 1.3rem;
+            }
+
+            .status-value-card {
+                font-size: 0.9rem;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header class="header">
+            <div class="logo">
+                <div class="logo-icon"><i class="fas fa-water"></i></div>
+                <div class="logo-text">
+                    <h1>WaterPump Monitoring System</h1>
+                    <p>Version 2.0 - Real-time Monitoring Dashboard</p>
+                </div>
+            </div>
+            <div class="system-status">
+                <div class="status-item">
+                    <div class="status-label">SYSTEM STATUS</div>
+                    <div class="status-value">OPERATIONAL</div>
+                </div>
+                <div class="status-item">
+                    <div class="status-label">LAST UPDATE</div>
+                    <div class="status-value" id="lastUpdateHeader">--</div>
+                </div>
+                <div class="status-item">
+                    <div class="status-label">UPTIME</div>
+                    <div class="status-value" id="uptimeHeader">--</div>
+                </div>
+            </div>
+        </header>
+        <div class="dashboard-grid">
+            <div class="card sensor-card">
+                <div class="card-header">
+                    <div class="card-title"><i class="fas fa-ruler-vertical"></i><h2>Water Level</h2></div>
+                    <div class="status-value-card" id="levelStatus">Normal</div>
+                </div>
+                <div class="water-level-indicator">
+                    <div class="water-level-values">
+                        <div class="water-level-item">
+                            <div class="water-level-value"><span id="distanceValue">--</span></div>
+                            <div class="water-level-label">Distance (cm)</div>
+                        </div>
+                        <div class="water-level-item">
+                            <div class="water-level-value"><span id="percentValue">--</span>%</div>
+                            <div class="water-level-label">Fill Percentage</div>
+                        </div>
+                        <div class="water-level-item">
+                            <div class="water-level-value"><span id="volumeValue">--</span></div>
+                            <div class="water-level-label">Liters</div>
+                        </div>
+                    </div>
+                    <div class="level-gauge"><div class="level-fill" id="levelFill"></div></div>
+                    <div class="level-markers"><span>Empty</span><span>50%</span><span>Full</span></div>
+                </div>
+            </div>
+            <div class="card energy-card">
+                <div class="card-header">
+                    <div class="card-title"><i class="fas fa-bolt"></i><h2>Energy Monitoring</h2></div>
+                    <div class="status-value-card" id="energyStatus">Stable</div>
+                </div>
+                <div class="energy-grid">
+                    <div class="energy-item">
+                        <div class="energy-icon"><i class="fas fa-bolt"></i></div>
+                        <div class="energy-label">VOLTAGE</div>
+                        <div class="energy-value" id="voltageValue">--</div>
+                        <div class="energy-unit">Volts</div>
+                    </div>
+                    <div class="energy-item">
+                        <div class="energy-icon"><i class="fas fa-bolt"></i></div>
+                        <div class="energy-label">CURRENT</div>
+                        <div class="energy-value" id="currentValue">--</div>
+                        <div class="energy-unit">Amps</div>
+                    </div>
+                    <div class="energy-item">
+                        <div class="energy-icon"><i class="fas fa-power-off"></i></div>
+                        <div class="energy-label">POWER</div>
+                        <div class="energy-value" id="powerValue">--</div>
+                        <div class="energy-unit">Watts</div>
+                    </div>
+                    <div class="energy-item">
+                        <div class="energy-icon"><i class="fas fa-chart-line"></i></div>
+                        <div class="energy-label">ENERGY</div>
+                        <div class="energy-value" id="energyValue">--</div>
+                        <div class="energy-unit">kWh</div>
+                    </div>
+                </div>
+                <button class="reset-btn" onclick="resetEnergy()"><i class="fas fa-sync-alt"></i> Reset Energy Counter</button>
+            </div>
+            <div class="card status-card">
+                <div class="card-header">
+                    <div class="card-title"><i class="fas fa-heartbeat"></i><h2>System Status</h2></div>
+                </div>
+                <div class="status-list">
+                    <div class="status-item-card">
+                        <div class="status-info">
+                            <div class="status-icon blue"><i class="fas fa-power-off"></i></div>
+                            <div class="status-text">
+                                <div class="status-name">Relay Status</div>
+                                <div class="status-desc">Pump control mechanism</div>
+                            </div>
+                        </div>
+                        <div class="status-value-card" id="relayStatusText">--</div>
+                    </div>
+                    <div class="status-item-card">
+                        <div class="status-info">
+                            <div class="status-icon green"><i class="fas fa-cogs"></i></div>
+                            <div class="status-text">
+                                <div class="status-name">Operation Mode</div>
+                                <div class="status-desc">Control system status</div>
+                            </div>
+                        </div>
+                        <div class="status-value-card" id="toggleModeText">--</div>
+                    </div>
+                    <div class="status-item-card">
+                        <div class="status-info">
+                            <div class="status-icon orange"><i class="fas fa-network-wired"></i></div>
+                            <div class="status-text">
+                                <div class="status-name">Network Status</div>
+                                <div class="status-desc">Connection information</div>
+                            </div>
+                        </div>
+                        <div class="status-value-card" id="ipAddress">--</div>
+                    </div>
+                    <div class="status-item-card">
+                        <div class="status-info">
+                            <div class="status-icon blue"><i class="fas fa-microchip"></i></div>
+                            <div class="status-text">
+                                <div class="status-name">ESP-NOW Status</div>
+                                <div class="status-desc">Communication link</div>
+                            </div>
+                        </div>
+                        <div class="status-value-card" id="espnowStatus">--</div>
+                    </div>
+                </div>
+            </div>
+            <div class="card control-card">
+                <div class="card-header">
+                    <div class="card-title"><i class="fas fa-sliders-h"></i><h2>Control Panel</h2></div>
+                </div>
+                <div class="relay-control">
+                    <button class="relay-btn" id="relayBtn">
+                        <span class="relay-switch"></span>
+                        <span class="relay-text">OFF</span>
+                    </button>
+                    <div class="status-value-card" id="pumpStatusText">Pump is currently STOPPED</div>
+                </div>
+                <div class="control-actions">
+                    <div class="control-group">
+                        <div class="control-label">Update Interval</div>
+                        <select class="interval-select" id="intervalSelect">
+                            <option value="5000">5 seconds</option>
+                            <option value="10000" selected>10 seconds</option>
+                            <option value="30000">30 seconds</option>
+                            <option value="60000">1 minute</option>
+                        </select>
+                    </div>
+                    <div class="control-group">
+                        <div class="control-label">Operation Mode</div>
+                        <button class="action-btn blue-btn" onclick="toggleAuto()"><i class="fas fa-sync-alt"></i> Toggle Auto/Manual</button>
+                    </div>
+                    <div class="control-group">
+                        <div class="control-label">Sensor Reading</div>
+                        <button class="action-btn gray-btn" onclick="manualSend()"><i class="fas fa-sync"></i> Refresh Data Now</button>
+                    </div>
+                    <div class="control-group">
+                        <div class="control-label">System Actions</div>
+                        <button class="action-btn gray-btn" onclick="systemReboot()"><i class="fas fa-redo"></i> Reboot System</button>
+                    </div>
+                </div>
+                <div class="control-group">
+                    <div class="control-label">Auto Control Settings</div>
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 10px;">
+                        <div>
+                            <label style="display: block; font-size: 0.8rem; color: var(--gray); margin-bottom: 4px;">Pump On Level (%)</label>
+                            <input type="number" id="pumpOnLevel" min="0" max="100" step="1">
+                        </div>
+                        <div>
+                            <label style="display: block; font-size: 0.8rem; color: var(--gray); margin-bottom: 4px;">Pump Off Level (%)</label>
+                            <input type="number" id="pumpOffLevel" min="0" max="100" step="1">
+                        </div>
+                    </div>
+                    <div style="margin-bottom: 10px;">
+                        <label style="display: block; font-size: 0.8rem; color: var(--gray); margin-bottom: 4px;">Power Cutoff (W)</label>
+                        <input type="number" id="powerCutoff" min="0" step="10">
+                    </div>
+                    <button class="action-btn blue-btn" onclick="saveAutoSettings()"><i class="fas fa-save"></i> Save Settings</button>
+                </div>
+            </div>
+            <div class="card ota-card">
+                <div class="card-header ota-header">
+                    <div class="card-title"><i class="fas fa-info-circle"></i><h2>Nakhon Phanom University</h2></div>
+                </div>
+                <div class="ota-content">
+                    <div style="text-align: center; margin-bottom: 15px;">
+                        <img src="logo.png" alt="Project Logo" style="max-width: 100%; height: auto;">
+                    </div>
+                    <div class="ota-info">
+                        <p>The WaterPump Monitoring System is an IoT solution designed to automate and monitor water pump operations in residential and agricultural settings.</p>
+                        <p>Key features include:</p>
+                        <ul style="margin-left: 20px;">
+                            <li>Real-time water level monitoring</li>
+                            <li>Energy consumption tracking</li>
+                            <li>Remote pump control</li>
+                            <li>Automated operation based on water levels</li>
+                        </ul>
+                    </div>
+                    <div class="ota-details">
+                        <div><strong>Version:</strong> 1.0</div>
+                        <div><strong>Developed by:</strong> K. Chooruang</div>
+                        <div><strong>Contact Us:</strong> komkritc@npu.ac.th</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="footer">
+            <p>WaterPump Monitoring System v1.0 | © 2025 NPU. All rights reserved.</p>
+        </div>
+    </div>
+    <script>
+        let auto = true, interval = 10000, intervalId, relayState = false;
+        let lastUpdateTime = "Never";
+
+        function loadAutoSettings() {
+            fetch("/getAutoSettings")
+                .then(response => response.json())
+                .then(data => {
+                    document.getElementById("pumpOnLevel").value = data.onLevel;
+                    document.getElementById("pumpOffLevel").value = data.offLevel;
+                    document.getElementById("powerCutoff").value = data.powerCutoff;
+                    auto = data.enabled;
+                    updateStatusPanel();
+                });
+        }
+
+        function updateStatusPanel() {
+            document.getElementById("relayStatusText").textContent = relayState ? "ON" : "OFF";
+            document.getElementById("toggleModeText").textContent = auto ? "Automatic" : "Manual";
+            document.getElementById("lastUpdateHeader").textContent = lastUpdateTime;
+        }
+
+        function updatePowerData() {
+            fetch("/powerData")
+                .then(r => r.json())
+                .then(data => {
+                    document.getElementById("voltageValue").textContent = data.voltage.toFixed(1);
+                    document.getElementById("currentValue").textContent = data.current.toFixed(3);
+                    document.getElementById("powerValue").textContent = data.power.toFixed(1);
+                    document.getElementById("energyValue").textContent = data.energy.toFixed(5);
+                    document.getElementById("energyStatus").textContent = data.power > 0 ? "Active" : "Idle";
+                });
+        }
+
+        function updateNetworkInfo() {
+            fetch("/networkInfo")
+                .then(r => r.json())
+                .then(data => {
+                    document.getElementById("ipAddress").textContent = data.ip;
+                });
+        }
+
+        function updateESPNOWStatus() {
+            fetch("/espnow_status")
+                .then(r => r.json())
+                .then(data => {
+                    const el = document.getElementById("espnowStatus");
+                    const isConnected = data.ready && data.lastUpdate < 15000;
+                    el.textContent = isConnected ? "Connected" : "Disconnected";
+                    el.className = "status-value-card " + (isConnected ? "success" : "danger");
+                });
+        }
+
+        async function fetchData() {
+            try {
+                const res = await fetch("/data");
+                const json = await res.json();
+                const distance = json.distance ?? 0;
+                const percent = json.percent ?? 0;
+                const volume = json.volume ?? 0;
+
+                document.getElementById("distanceValue").textContent = distance.toFixed(1);
+                document.getElementById("percentValue").textContent = percent.toFixed(1);
+                document.getElementById("volumeValue").textContent = volume.toFixed(0);
+
+                const levelPercentage = percent;
+                document.getElementById("levelFill").style.width = levelPercentage + '%';
+
+                const levelStatus = document.getElementById("levelStatus");
+                if (levelPercentage < 20) levelStatus.textContent = "Low";
+                else if (levelPercentage < 50) levelStatus.textContent = "Medium";
+                else levelStatus.textContent = "Normal";
+
+                const relayRes = await fetch("/relayState");
+                relayState = await relayRes.json();
+                updateRelayButton();
+
+                const updateRes = await fetch("/lastUpdate");
+                lastUpdateTime = await updateRes.text();
+                document.getElementById("lastUpdateHeader").textContent = lastUpdateTime;
+
+                updateStatusPanel();
+            } catch (e) {
+                console.error("Fetch error:", e);
+            }
+        }
+
+        function updateUptime() {
+            fetch("/uptime")
+                .then(r => r.text())
+                .then(text => {
+                    document.getElementById("uptimeHeader").textContent = text;
+                });
+        }
+
+        function updateRelayButton() {
+            const btn = document.getElementById("relayBtn");
+            btn.classList.toggle('on', relayState);
+            btn.querySelector('.relay-text').textContent = relayState ? "ON" : "OFF";
+            document.getElementById("pumpStatusText").textContent = "Pump is currently " + (relayState ? "RUNNING" : "STOPPED");
+        }
+
+        async function toggleRelay() {
+            await fetch("/toggleRelay");
+            relayState = !relayState;
+            updateRelayButton();
+            updateStatusPanel();
+        }
+
+        function resetEnergy() {
+            fetch("/resetEnergy")
+                .then(() => {
+                    updatePowerData();
+                    alert("Energy counter has been reset");
+                });
+        }
+
+        function toggleAuto() {
+            fetch("/toggleAutoControl")
+                .then(response => response.text())
+                .then(state => {
+                    auto = state === "true";
+                    clearInterval(intervalId);
+                    if (auto) intervalId = setInterval(fetchData, interval);
+                    updateStatusPanel();
+                    alert("Auto control is now " + (auto ? "ENABLED" : "DISABLED"));
+                });
+        }
+
+        function manualSend() {
+            fetch("/send")
+                .then(() => setTimeout(fetchData, 1000));
+        }
+
+        function systemReboot() {
+            if (confirm("Are you sure you want to reboot the system?")) {
+                fetch("/reboot");
+            }
+        }
+
+        function saveAutoSettings() {
+            const onLevel = parseFloat(document.getElementById('pumpOnLevel').value);
+            const offLevel = parseFloat(document.getElementById('pumpOffLevel').value);
+            const cutoff = parseFloat(document.getElementById('powerCutoff').value);
+
+            if (onLevel >= offLevel) {
+                alert("Error: Pump On level must be less than Pump Off level");
+                return;
+            }
+
+            if (cutoff <= 0) {
+                alert("Error: Power cutoff must be a positive number");
+                return;
+            }
+
+            fetch('/setAutoSettings?on=' + onLevel + '&off=' + offLevel + '&cutoff=' + cutoff)
+                .then(response => response.text())
+                .then(data => {
+                    alert(data);
+                })
+                .catch(error => {
+                    alert("Error saving settings: " + error);
+                });
+        }
+
+        document.getElementById("intervalSelect").addEventListener('change', (e) => {
+            interval = parseInt(e.target.value);
+            if (auto) {
+                clearInterval(intervalId);
+                intervalId = setInterval(fetchData, interval);
+            }
+        });
+
+        document.getElementById("relayBtn").addEventListener('click', toggleRelay);
+
+        window.onload = () => {
+            loadAutoSettings();
+            fetchData();
+            updateNetworkInfo();
+            updateESPNOWStatus();
+            intervalId = setInterval(fetchData, interval);
+            setInterval(updateUptime, 1000);
+            setInterval(updatePowerData, 2000);
+            setInterval(updateESPNOWStatus, 5000);
+            updateStatusPanel();
+        };
+    </script>
+</body>
+</html>
