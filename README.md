@@ -41,7 +41,7 @@
 ## 🛠 System Components
 
 ### 1. Pump Controller (`MainControl_v6.ino`)
-- **Platform:** ESP8266  
+- **Platform:** ESP8266 (SonOff S31)  
 - Relay control for water pump  
 - CSE7766 power monitoring IC  
 - ESP-NOW communication  
