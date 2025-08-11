@@ -1,10 +1,10 @@
 /*
- * Smart Water Tank Monitoring System
+ * Smart Water Tank Monitoring System with Manual Configuration
  *
  * Description:
  * This ESP8266-based system provides comprehensive monitoring of water tank levels with:
  * - Ultrasonic distance measurement for accurate water level detection
- * - Multiple tank size presets with automatic volume calculations
+ * - Multiple tank size presets AND manual dimension input
  * - ESP-NOW communication for wireless sensor networking
  * - Real-time web dashboard with visual tank representation and captive portal
  * - OTA firmware update capability
@@ -13,6 +13,7 @@
  * Features:
  * - Real-time water level percentage and volume calculations
  * - Mobile-responsive web interface with captive portal
+ * - Both preset and manual tank dimension configuration
  * - Sensor calibration capability
  * - Data persistence in EEPROM
  * - Wireless communication with other ESP devices
@@ -24,7 +25,7 @@
  *
  * Designed by: Komkrit Chooraung
  * Date: 10-8-2025
- * Version: 1.1 (Captive Portal Update)
+ * Version: 1.2 (Manual Configuration Update)
  */
 
 #include <ESP8266WiFi.h>
@@ -33,7 +34,7 @@
 #include <ESP8266WebServer.h>
 #include <EEPROM.h>
 #include <ArduinoOTA.h>
-#include <DNSServer.h> // Added for Captive Portal
+#include <DNSServer.h>
 
 // --- Constants ---
 #define EEPROM_SIZE 64
@@ -44,11 +45,11 @@
 
 #define RX_PIN D1
 #define TX_PIN D2
-#define SENSOR_READ_TIMEOUT 100   // ms
-#define SERIAL_INPUT_TIMEOUT 5000 // ms
-#define UPDATE_INTERVAL 2000      // ms for web dashboard updates
+#define SENSOR_READ_TIMEOUT 100    // ms
+#define SERIAL_INPUT_TIMEOUT 5000  // ms
+#define UPDATE_INTERVAL 2000       // ms for web dashboard updates
 
-const byte DNS_PORT = 53; // DNS server port for captive portal
+const byte DNS_PORT = 53;  // DNS server port for captive portal
 
 // Tank presets {Width, Height, VolumeFactor}
 const float TANK_PRESETS[][3] = {
@@ -89,7 +90,7 @@ uint8_t requestingMAC[6];
 
 // Web Server & DNS
 ESP8266WebServer server(80);
-DNSServer dnsServer; // Added for Captive Portal
+DNSServer dnsServer;
 SoftwareSerial sensorSerial(RX_PIN, TX_PIN);
 
 // --- EEPROM Functions ---
@@ -205,7 +206,9 @@ String formatRuntime(unsigned long ms) {
 void handleRoot() {
   updateMeasurements();
   String waterColor = (percent < 20) ? "#ff4444" : "#4285f4";
+  float maxVolume = volumeFactor * tankHeight;
 
+  // Single raw string with placeholders like %PLACEHOLDER%
   String html = FPSTR(R"=====(
 <!DOCTYPE html>
 <html>
@@ -225,8 +228,12 @@ void handleRoot() {
     .stat-card { background: #f9f9f9; padding: 15px; border-radius: 8px; text-align: center; }
     .stat-card h3 { margin: 0 0 5px 0; font-size: 14px; color: #666; font-weight: 400; }
     .stat-card p { margin: 0; font-size: 20px; font-weight: 500; }
-    .tank-visual { height: 200px; width: 100%; background: #e0e0e0; border-radius: 5px; position: relative; overflow: hidden; margin: 20px 0; border: 1px solid #ddd; }
+    .tank-container { margin: 20px 0; position: relative; }
+    .tank-visual { width: 100%; height: 200px; background: #e0e0e0; border-radius: 5px; position: relative; overflow: hidden; border: 1px solid #ddd; }
     .water-level { position: absolute; bottom: 0; width: 100%; background: var(--water-color); transition: all 0.5s ease; }
+    .tank-labels { display: flex; flex-direction: column;  justify-content: flex-start;  align-items: flex-start;  margin-top: 5px;}
+    .tank-label { font-size: 12px; color: #666; }
+    .current-level { position: absolute; left: 50%; transform: translateX(-50%); bottom: calc(%PERCENT%% - 12px); font-size: 12px; background: white; padding: 2px 5px; border-radius: 3px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); z-index: 2; }
     .footer { margin-top: 20px; font-size: 12px; color: #999; text-align: center; border-top: 1px solid #eee; padding-top: 15px; }
     .config-link { display: inline-block; margin-top: 15px; color: #4285f4; text-decoration: none; font-weight: 500; }
     .config-link:hover { text-decoration: underline; }
@@ -239,13 +246,9 @@ void handleRoot() {
     <div class="last-update" id="lastUpdate">Last update: Just now</div>
     
     <div class="gauge-container">
-      <div class="gauge" id="gauge" style="--water-color: )=====");
-  html += waterColor + "; --water-level: " + String(percent) + "%;";
-  html += FPSTR(R"=====(">
+      <div class="gauge" id="gauge" style="--water-color: %WATER_COLOR%; --water-level: %PERCENT%%;">
         <div class="gauge-inner">
-          <span id="percentValue">)=====");
-  html += String(percent, 1) + "%";
-  html += FPSTR(R"=====(</span>
+          <span id="percentValue">%PERCENT% %</span>
         </div>
       </div>
     </div>
@@ -253,43 +256,38 @@ void handleRoot() {
     <div class="stats">
       <div class="stat-card">
         <h3>Distance</h3>
-        <p id="distanceValue">)=====");
-  html += String(cm, 1) + " cm";
-  html += FPSTR(R"=====(</p>
+        <p id="distanceValue">%DISTANCE% cm</p>
       </div>
       <div class="stat-card">
         <h3>Volume</h3>
-        <p id="volumeValue">)=====");
-  html += String(volume, 1) + " L";
-  html += FPSTR(R"=====(</p>
+        <p id="volumeValue">%VOLUME% L</p>
       </div>
       <div class="stat-card">
         <h3>Tank Width</h3>
-        <p>)=====");
-  html += String(tankWidth) + " cm";
-  html += FPSTR(R"=====(</p>
+        <p>%TANK_WIDTH% cm</p>
       </div>
       <div class="stat-card">
         <h3>Tank Height</h3>
-        <p>)=====");
-  html += String(tankHeight) + " cm";
-  html += FPSTR(R"=====(</p>
+        <p>%TANK_HEIGHT% cm</p>
       </div>
     </div>
     
-    <div class="tank-visual">
-      <div class="water-level" id="waterLevel" style="height: )=====");
-  html += String(percent) + "%; background: " + waterColor;
-  html += FPSTR(R"=====(;"></div>
+    <div class="tank-container">
+      <div class="tank-labels">
+        <span class="tank-label">%MAX_VOLUME% L (MAX)</span>
+      </div>
+      <div class="tank-visual">
+        <div class="water-level" id="waterLevel" style="height: %PERCENT%%; background: %WATER_COLOR%;"></div>
+        <div class="current-level" id="currentLevel">%VOLUME% L (%PERCENT%%)</div>
+      </div>
+      <div class="tank-labels">
+        <span class="tank-label">0 L (MIN)</span>
+      </div>
     </div>
     
     <div class="footer">
-      <p>MAC: )=====");
-  html += WiFi.macAddress();
-  html += FPSTR(R"=====(<br>
-      Uptime: <span id="uptimeValue">)=====");
-  html += formatRuntime(millis());
-  html += FPSTR(R"=====(</span></p>
+      <p>MAC: %MAC_ADDRESS%<br>
+      Uptime: <span id="uptimeValue">%UPTIME%</span></p>
       <a href="/config" class="config-link">Configure Tank</a>
     </div>
   </div>
@@ -301,23 +299,24 @@ void handleRoot() {
         .then(data => {
           const waterColor = data.percent < 20 ? '#ff4444' : '#4285f4';
           
-          // Update values
           document.getElementById('percentValue').textContent = data.percent.toFixed(1) + '%';
           document.getElementById('distanceValue').textContent = data.distance.toFixed(1) + ' cm';
-          document.getElementById('volumeValue').textContent = data.volume.toFixed(0);
+          document.getElementById('volumeValue').textContent = data.volume.toFixed(1) + ' L';
           document.getElementById('uptimeValue').textContent = data.uptime;
           
-          // Update water level and gauge
           const waterLevel = document.getElementById('waterLevel');
+          const currentLevel = document.getElementById('currentLevel');
           const gauge = document.getElementById('gauge');
           
           waterLevel.style.height = data.percent + '%';
           waterLevel.style.backgroundColor = waterColor;
           
+          currentLevel.style.bottom = 'calc(' + data.percent + '% - 12px)';
+          currentLevel.textContent = data.volume.toFixed(1) + ' L (' + data.percent.toFixed(1) + '%)';
+          
           gauge.style.setProperty('--water-color', waterColor);
           gauge.style.setProperty('--water-level', data.percent + '%');
           
-          // Update last update time
           const now = new Date();
           document.getElementById('lastUpdate').textContent = 
             'Last update: ' + now.toLocaleTimeString();
@@ -328,13 +327,23 @@ void handleRoot() {
     }
 
     updateDashboard();
-    setInterval(updateDashboard, )=====");
-  html += String(UPDATE_INTERVAL);
-  html += FPSTR(R"=====();
+    setInterval(updateDashboard, %UPDATE_INTERVAL%);
   </script>
 </body>
 </html>
 )=====");
+
+  // Replace placeholders with actual values
+  html.replace("%WATER_COLOR%", waterColor);
+  html.replace("%PERCENT%", String(percent, 1));
+  html.replace("%DISTANCE%", String(cm, 1));
+  html.replace("%VOLUME%", String(volume, 1));
+  html.replace("%TANK_WIDTH%", String(tankWidth));
+  html.replace("%TANK_HEIGHT%", String(tankHeight));
+  html.replace("%MAX_VOLUME%", String(maxVolume, 1));
+  html.replace("%MAC_ADDRESS%", WiFi.macAddress());
+  html.replace("%UPTIME%", formatRuntime(millis()));
+  html.replace("%UPDATE_INTERVAL%", String(UPDATE_INTERVAL));
 
   server.send(200, "text/html", html);
 }
@@ -353,19 +362,37 @@ void handleData() {
 }
 
 void handleConfig() {
-  if (server.hasArg("tank_size")) {
-    int presetIndex = server.arg("tank_size").toInt();
-    if (presetIndex >= 0 && presetIndex < sizeof(TANK_PRESETS) / sizeof(TANK_PRESETS[0])) {
-      tankWidth = TANK_PRESETS[presetIndex][0];
-      tankHeight = TANK_PRESETS[presetIndex][1];
-      volumeFactor = TANK_PRESETS[presetIndex][2];
-      saveConfig();
+  // Handle form submission
+  if (server.hasArg("save")) {
+    if (server.hasArg("preset_mode") && server.arg("preset_mode") == "1") {
+      // Preset mode selected
+      int presetIndex = server.arg("preset_size").toInt();
+      if (presetIndex >= 0 && presetIndex < sizeof(TANK_PRESETS) / sizeof(TANK_PRESETS[0])) {
+        tankWidth = TANK_PRESETS[presetIndex][0];
+        tankHeight = TANK_PRESETS[presetIndex][1];
+        volumeFactor = TANK_PRESETS[presetIndex][2];
+      }
+    } else {
+      // Manual mode selected
+      tankWidth = server.arg("manual_width").toFloat();
+      tankHeight = server.arg("manual_height").toFloat();
+
+      // Calculate volume factor (assuming rectangular tank)
+      volumeFactor = (tankWidth * tankWidth) / 1000.0f;  // converts cm³ to liters per cm height
     }
+
+    // Save calibration if provided
+    if (server.hasArg("calibration")) {
+      calibration_mm = server.arg("calibration").toInt() * 10;  // convert cm to mm
+    }
+
+    saveConfig();
     server.sendHeader("Location", "/");
     server.send(302, "text/plain", "");
     return;
   }
 
+  // Generate the configuration page
   String html = FPSTR(R"=====(
 <!DOCTYPE html>
 <html lang='en'>
@@ -410,7 +437,7 @@ void handleConfig() {
       margin-bottom: 8px;
       font-weight: 600;
     }
-    select, input[type='number'] {
+    select, input[type='number'], input[type='text'] {
       width: 100%;
       padding: 10px;
       border: 1px solid var(--border-color);
@@ -428,6 +455,7 @@ void handleConfig() {
       cursor: pointer;
       width: 100%;
       transition: background-color 0.3s;
+      margin-top: 15px;
     }
     input[type='submit']:hover {
       background-color: var(--secondary-color);
@@ -442,26 +470,139 @@ void handleConfig() {
     .back-link:hover {
       text-decoration: underline;
     }
+    .mode-selector {
+      display: flex;
+      margin-bottom: 20px;
+      border-bottom: 1px solid var(--border-color);
+      padding-bottom: 15px;
+    }
+    .mode-option {
+      flex: 1;
+      text-align: center;
+      padding: 10px;
+      cursor: pointer;
+      border-bottom: 3px solid transparent;
+    }
+    .mode-option.active {
+      border-bottom-color: var(--primary-color);
+      font-weight: bold;
+    }
+    .mode-option input {
+      display: none;
+    }
+    .manual-inputs {
+      display: none;
+    }
+    .preset-inputs {
+      display: block;
+    }
+    .calibration-input {
+      margin-top: 20px;
+      padding-top: 20px;
+      border-top: 1px solid var(--border-color);
+    }
   </style>
 </head>
 <body>
   <div class="config-form">
     <h2>Tank Configuration</h2>
-    <form method='GET'>
-      <div class="form-group">
-        <label for='tank_size'>Tank Size</label>
-        <select id='tank_size' name='tank_size' required>
-          <option value='0'>500L (68cm × 162cm)</option>
-          <option value='1'>700L (79.5cm × 170cm)</option>
-          <option value='2'>1000L (92.5cm × 181cm)</option>
-          <option value='3'>1500L (109cm × 196cm)</option>
-          <option value='4'>2000L (123cm × 205cm)</option>
-        </select>
+    <form method='GET' action='/config'>
+      <input type='hidden' name='save' value='1'>
+      
+      <div class="mode-selector">
+        <label class="mode-option active" onclick="toggleMode('preset')">
+          <input type="radio" name="preset_mode" value="1" checked> Preset Tank
+        </label>
+        <label class="mode-option" onclick="toggleMode('manual')">
+          <input type="radio" name="preset_mode" value="0"> Custom Tank
+        </label>
       </div>
+      
+      <div class="preset-inputs" id="preset-inputs">
+        <div class="form-group">
+          <label for='preset_size'>Tank Size</label>
+          <select id='preset_size' name='preset_size' required>
+            <option value='0'>500L (68cm × 162cm)</option>
+            <option value='1'>700L (79.5cm × 170cm)</option>
+            <option value='2'>1000L (92.5cm × 181cm)</option>
+            <option value='3'>1500L (109cm × 196cm)</option>
+            <option value='4'>2000L (123cm × 205cm)</option>
+          </select>
+        </div>
+      </div>
+      
+      <div class="manual-inputs" id="manual-inputs">
+        <div class="form-group">
+          <label for='manual_width'>Tank Width (cm)</label>
+          <input type='number' id='manual_width' name='manual_width' step='0.1' min='10' max='300' value=')=====");
+  html += String(tankWidth, 1);
+  html += FPSTR(R"=====('>
+        </div>
+        <div class="form-group">
+          <label for='manual_height'>Tank Height (cm)</label>
+          <input type='number' id='manual_height' name='manual_height' step='0.1' min='10' max='300' value=')=====");
+  html += String(tankHeight, 1);
+  html += FPSTR(R"=====('>
+        </div>
+      </div>
+      
+      <div class="calibration-input">
+        <div class="form-group">
+          <label for='calibration'>Sensor Calibration (cm)</label>
+          <input type='number' id='calibration' name='calibration' step='0.1' value=')=====");
+  html += String(calibration_mm / 10.0f, 1);
+  html += FPSTR(R"=====('>
+          <small>Positive values move water level up, negative down</small>
+        </div>
+      </div>
+      
       <input type='submit' value='Save Configuration'>
     </form>
   </div>
   <a href='/' class='back-link'>&larr; Back to Dashboard</a>
+  
+  <script>
+    function toggleMode(mode) {
+      const presetInputs = document.getElementById('preset-inputs');
+      const manualInputs = document.getElementById('manual-inputs');
+      const presetOption = document.querySelector('.mode-option:nth-child(1)');
+      const manualOption = document.querySelector('.mode-option:nth-child(2)');
+      
+      if (mode === 'preset') {
+        presetInputs.style.display = 'block';
+        manualInputs.style.display = 'none';
+        presetOption.classList.add('active');
+        manualOption.classList.remove('active');
+        document.querySelector('input[name="preset_mode"][value="1"]').checked = true;
+      } else {
+        presetInputs.style.display = 'none';
+        manualInputs.style.display = 'block';
+        presetOption.classList.remove('active');
+        manualOption.classList.add('active');
+        document.querySelector('input[name="preset_mode"][value="0"]').checked = true;
+      }
+    }
+    
+    // Initialize form with current values
+    window.onload = function() {
+      // Check if current dimensions match any preset
+      let isPreset = false;
+      const presetSelect = document.getElementById('preset_size');
+      
+      for (let i = 0; i < presetSelect.options.length; i++) {
+        if (Math.abs(tankWidth - TANK_PRESETS[i][0]) < 0.1 && 
+            Math.abs(tankHeight - TANK_PRESETS[i][1]) < 0.1) {
+          presetSelect.selectedIndex = i;
+          isPreset = true;
+          break;
+        }
+      }
+      
+      if (!isPreset) {
+        toggleMode('manual');
+      }
+    };
+  </script>
 </body>
 </html>
 )=====");
@@ -481,7 +622,6 @@ void setup() {
   WiFi.softAP("TankMonitor", "12345678");
   Serial.printf("AP IP: %s\n", WiFi.softAPIP().toString().c_str());
 
-  // --- Captive Portal Setup ---
   // Start the DNS server to redirect all traffic to the ESP's IP
   dnsServer.start(DNS_PORT, "*", WiFi.softAPIP());
 
@@ -493,8 +633,7 @@ void setup() {
   server.on("/", handleRoot);
   server.on("/config", handleConfig);
   server.on("/data", handleData);
-  // Redirect any other requests to the root page
-  server.onNotFound(handleRoot); 
+  server.onNotFound(handleRoot);
   server.begin();
 
   // ESP-NOW Setup
@@ -525,7 +664,7 @@ void setup() {
 void loop() {
   ArduinoOTA.handle();
   server.handleClient();
-  dnsServer.processNextRequest(); // Process DNS requests for captive portal
+  dnsServer.processNextRequest();  // Process DNS requests for captive portal
 
   if (pendingDistanceRequest || pendingDistanceRequest_2) {
     bool success = readDistance(mm, cm);
