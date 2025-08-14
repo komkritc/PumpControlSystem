@@ -28,11 +28,7 @@
  *
  * Designed by: Komkrit Chooraung
  * Date: 11-8-2025
- * Version: 2.1 (Added RS232 Commands)
- * Version: 3.1 (Added WiFi SSID Connection)
- * Version: 3.2 (Added WiFi SSID Connection Config Page)
- * Version: 3.2 (Added MQTT)
- * Version: 4.0 (1st Release Candidate)
+ * Version: 1.0rc (add LEDs and fix mqtt re-connect wifi if lost, add time-sync)
  */
 
 #include <ESP8266WiFi.h>
@@ -42,10 +38,15 @@
 #include <EEPROM.h>
 #include <ArduinoOTA.h>
 #include <DNSServer.h>
+#include <sys/time.h>
+#include <time.h>          // For time functions
 #include <ESP8266mDNS.h>   // Add this line with the other includes
 #include <PubSubClient.h>  // MQTT client library
 
 // --- Constants ---
+#define NTP_SERVER1 "pool.ntp.org"
+#define NTP_SERVER2 "time.nist.gov"
+#define TIME_ZONE_OFFSET 7  // UTC time (adjust for your timezone if needed)
 #define EEPROM_SIZE 128
 #define ADDR_WIDTH 0       // float (4 bytes)
 #define ADDR_HEIGHT 4      // float (4 bytes)
@@ -53,6 +54,9 @@
 #define ADDR_CALIB 12      // int (4 bytes)
 #define ADDR_WIFI_SSID 16  // 32 bytes
 #define ADDR_WIFI_PASS 48  // 32 bytes
+
+#define WIFI_CONNECTED_LED D8     // GPIO15 for WiFi connected status
+#define WIFI_DISCONNECTED_LED D7  // GPIO13 for WiFi disconnected status
 
 // Add these right after your other global variables (around line 150)
 WiFiClient wifiClient;
@@ -62,7 +66,7 @@ String mqttClientId;
 
 
 // --- Config Macros ---
-#define DEVICE_NAME "TankMonitor100"  // Device name (AP/mDNS/OTA)
+#define DEVICE_NAME "TankMonitor144"  // Device name (AP/mDNS/OTA)
 #define WIFI_AP_PASSWORD "12345678"   // AP mode password
 #define OTA_PASSWORD "12345678"       // OTA update password (optional)
 
@@ -168,38 +172,37 @@ struct PerformanceMetrics {
 
 PerformanceMetrics performanceMetrics;
 
-// --- MQTT Functions ---
+// --- MQTT Functions --- (Revised)
 void mqttReconnect() {
-  if (!MQTT_ENABLED) return;
+  if (!MQTT_ENABLED || WiFi.status() != WL_CONNECTED) return;
 
-  // Loop until we're reconnected
-  while (!mqttClient.connected()) {
+  static unsigned long lastAttempt = 0;
+  const unsigned long retryInterval = 5000;  // 5 seconds between attempts
+
+  if (millis() - lastAttempt >= retryInterval) {
     Serial.print("Attempting MQTT connection...");
 
-    // Attempt to connect
     if (mqttClient.connect(mqttClientId.c_str(), MQTT_USER, MQTT_PASSWORD)) {
       Serial.println("connected");
-
       // Once connected, publish an announcement
       String statusTopic = String(MQTT_TOPIC) + "/status";
       mqttClient.publish(statusTopic.c_str(), "online", true);
     } else {
       Serial.print("failed, rc=");
-      Serial.print(mqttClient.state());
-      Serial.println(" try again in 5 seconds");
-      // Wait 5 seconds before retrying
-      delay(5000);
+      Serial.println(mqttClient.state());
     }
+    lastAttempt = millis();
   }
 }
 
-void publishMqttData() {
-  if (!MQTT_ENABLED || !mqttClient.connected()) return;
+bool publishMqttData() {
+  if (!MQTT_ENABLED || !mqttClient.connected()) return false;
 
   updateMeasurements();
 
-  // Create JSON payload
+  // Create JSON payload with timestamp
   String payload = "{";
+  payload += "\"timestamp\":\"" + getUKTimestamp() + "\",";  // New timestamp field
   payload += "\"distance\":" + String(cm, 1) + ",";
   payload += "\"percent\":" + String(percent, 1) + ",";
   payload += "\"volume\":" + String(volume, 1) + ",";
@@ -220,8 +223,10 @@ void publishMqttData() {
     Serial.println(MQTT_TOPIC);
     Serial.println(payload);
     Serial.println("MQTT data published successfully");
+    return true;
   } else {
     Serial.println("MQTT publish failed");
+    return false;
   }
 }
 
@@ -432,6 +437,9 @@ void handleSerialInput() {
   }
 }
 
+
+
+
 // --- EEPROM Functions ---
 void saveConfig() {
   EEPROM.put(ADDR_WIDTH, tankWidth);
@@ -603,6 +611,26 @@ String getSensorStats() {
   stats += "\"avgReadTime\":" + String(performanceMetrics.averageReadTime);
   stats += "}";
   return stats;
+}
+
+String getUKTimestamp() {
+  time_t now = time(nullptr);
+  struct tm timeinfo;
+  localtime_r(&now, &timeinfo);  // Get local UK time (auto-adjusts for BST/GMT)
+  
+  char buffer[20];
+  strftime(buffer, sizeof(buffer), "%d-%m-%Y %H:%M:%S", &timeinfo); // DD-MM-YYYY HH:MM:SS
+  return String(buffer);
+}
+
+String getCurrentTimestamp() {
+  time_t now = time(nullptr);
+  struct tm timeinfo;
+  gmtime_r(&now, &timeinfo);
+
+  char buffer[25];
+  strftime(buffer, sizeof(buffer), "%Y-%m-%dT%H:%M:%SZ", &timeinfo);
+  return String(buffer);
 }
 
 // --- ESP-NOW Functions ---
@@ -1508,8 +1536,265 @@ void handleSensorReading() {
   handleESPNowRequest();
 }
 
+// --- WiFi Improvement Functions ---
+
+void initWiFiDependentServices() {
+  if (MQTT_ENABLED) {
+    mqttClient.setServer(MQTT_SERVER, MQTT_PORT);
+    mqttClient.setBufferSize(512);
+  }
+}
+
+// --- WiFi Connection Management ---
+
+void startAPMode() {
+  Serial.println("Starting AP mode");
+  WiFi.mode(WIFI_AP);
+  bool apStarted = WiFi.softAP(DEVICE_NAME, WIFI_AP_PASSWORD);
+
+  if (apStarted) {
+    Serial.printf("AP IP address: %s\n", WiFi.softAPIP().toString().c_str());
+    dnsServer.start(DNS_PORT, "*", WiFi.softAPIP());
+    // In AP mode, both LEDs have special behavior
+    digitalWrite(WIFI_CONNECTED_LED, LOW);
+    digitalWrite(WIFI_DISCONNECTED_LED, HIGH);
+  } else {
+    Serial.println("Failed to start AP!");
+    // Error state - alternate blinking
+    digitalWrite(WIFI_CONNECTED_LED, !digitalRead(WIFI_CONNECTED_LED));
+    digitalWrite(WIFI_DISCONNECTED_LED, !digitalRead(WIFI_DISCONNECTED_LED));
+    delay(500);
+  }
+}
+
+void updateWiFiStatusLEDs() {
+  static bool lastWiFiStatus = false;
+  bool currentWiFiStatus = (WiFi.status() == WL_CONNECTED);
+
+  if (currentWiFiStatus != lastWiFiStatus) {
+    if (currentWiFiStatus) {
+      // WiFi connected - turn on connected LED, turn off disconnected LED
+      digitalWrite(WIFI_CONNECTED_LED, HIGH);
+      digitalWrite(WIFI_DISCONNECTED_LED, LOW);
+      Serial.println("WiFi connected - Connected LED ON, Disconnected LED OFF");
+    } else {
+      // WiFi disconnected - turn off connected LED, blink disconnected LED
+      digitalWrite(WIFI_CONNECTED_LED, LOW);
+      Serial.println("WiFi disconnected - Connected LED OFF, Disconnected LED blinking");
+    }
+    lastWiFiStatus = currentWiFiStatus;
+  }
+
+  // Blink disconnected LED if WiFi is not connected
+  if (!currentWiFiStatus) {
+    static unsigned long lastBlinkTime = 0;
+    if (millis() - lastBlinkTime >= 500) {  // Blink every 500ms
+      digitalWrite(WIFI_DISCONNECTED_LED, !digitalRead(WIFI_DISCONNECTED_LED));
+      lastBlinkTime = millis();
+    }
+  }
+}
+
+bool hasValidWiFiCredentials() {
+  char ssid[32] = { 0 };
+  char pass[32] = { 0 };
+  EEPROM.get(ADDR_WIFI_SSID, ssid);
+  EEPROM.get(ADDR_WIFI_PASS, pass);
+  return (strlen(ssid) > 0);
+}
+
+bool safeMqttReconnect() {
+  if (!MQTT_ENABLED || WiFi.status() != WL_CONNECTED) {
+    return false;
+  }
+
+  static unsigned long lastAttempt = 0;
+  const unsigned long retryInterval = 5000;  // 5 seconds between attempts
+
+  if (millis() - lastAttempt < retryInterval) {
+    return false;
+  }
+
+  Serial.println("Attempting MQTT reconnection...");
+
+  // Disconnect first if needed
+  if (mqttClient.connected()) {
+    mqttClient.disconnect();
+    delay(100);
+  }
+
+  // Generate fresh client ID each time
+  String clientId = String(MQTT_CLIENT_ID);
+  clientId.replace("%06X", String(ESP.getChipId(), HEX));
+
+  // Additional connection parameters
+  bool connected = mqttClient.connect(
+    clientId.c_str(),
+    MQTT_USER,
+    MQTT_PASSWORD,
+    (String(MQTT_TOPIC) + "/status").c_str(),
+    1,         // QoS 1
+    true,      // Retain
+    "offline"  // Will message
+  );
+
+  if (connected) {
+    Serial.println("MQTT connected!");
+    // Publish online status
+    mqttClient.publish(
+      (String(MQTT_TOPIC) + "/status").c_str(),
+      "online",
+      true  // Retain
+    );
+
+    // Resubscribe to topics if needed
+    // mqttClient.subscribe("topic/subtopic");
+
+    return true;
+  } else {
+    Serial.print("MQTT connection failed, rc=");
+    Serial.println(mqttClient.state());
+    return false;
+  }
+
+  lastAttempt = millis();
+}
+
+void connectToWiFi() {
+  char ssid[32] = { 0 };
+  char pass[32] = { 0 };
+  EEPROM.get(ADDR_WIFI_SSID, ssid);
+  EEPROM.get(ADDR_WIFI_PASS, pass);
+
+  if (strlen(ssid)) {
+    Serial.printf("Attempting to connect to WiFi: %s\n", ssid);
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(ssid, pass);
+
+    unsigned long startTime = millis();
+    bool connected = false;
+
+    // Try to connect for 20 seconds max
+    while (millis() - startTime < 20000) {
+      if (WiFi.status() == WL_CONNECTED) {
+        connected = true;
+        break;
+      }
+      updateWiFiStatusLEDs();  // Update LED status during connection attempt
+      delay(500);
+      Serial.print(".");
+    }
+
+    if (connected) {
+      Serial.println("\nWiFi connected!");
+      Serial.print("IP Address: ");
+      Serial.println(WiFi.localIP());
+      digitalWrite(WIFI_CONNECTED_LED, HIGH);
+      digitalWrite(WIFI_DISCONNECTED_LED, LOW);
+
+      // Configure NTP time synchronization
+      configTime(TIME_ZONE_OFFSET * 3600, 0, NTP_SERVER1, NTP_SERVER2);
+      Serial.println("Waiting for NTP time sync...");
+
+      time_t now = time(nullptr);
+      int retries = 0;
+      while (now < 8 * 3600 * 2 && retries < 30) {  // Wait for valid time
+        delay(500);
+        now = time(nullptr);
+        retries++;
+        Serial.print(".");
+      }
+
+      if (now >= 8 * 3600 * 2) {
+        Serial.println("\nTime synchronized:");
+        Serial.println(getUKTimestamp());
+      } else {
+        Serial.println("\nFailed to get NTP time");
+      }
+
+      if (!mqttClient.connected()) {
+        safeMqttReconnect();
+      } else {
+        // Handle regular MQTT operations
+        mqttClient.loop();
+      }
+      return;
+    }
+  }
+
+  // If no credentials or connection failed, start AP mode
+  startAPMode();
+}
+
+// Helper function to translate WiFi status codes to strings
+const char *getWiFiStatusName(int status) {
+  switch (status) {
+    case WL_IDLE_STATUS: return "IDLE";
+    case WL_NO_SSID_AVAIL: return "NO_SSID_AVAIL";
+    case WL_SCAN_COMPLETED: return "SCAN_COMPLETED";
+    case WL_CONNECTED: return "CONNECTED";
+    case WL_CONNECT_FAILED: return "CONNECT_FAILED";
+    case WL_CONNECTION_LOST: return "CONNECTION_LOST";
+    case WL_DISCONNECTED: return "DISCONNECTED";
+    default: return "UNKNOWN";
+  }
+}
+
+
+// --- WiFi Connection Management --- (Revised)
+void checkWiFiConnection() {
+  static unsigned long lastCheck = 0;
+  static unsigned long lastReconnectAttempt = 0;
+  const unsigned long checkInterval = 5000;        // 5 seconds
+  const unsigned long reconnectInterval = 300000;  // 5 minutes
+  //const unsigned long reconnectInterval = 60000;  // 60 sec
+
+  if (millis() - lastCheck >= checkInterval) {
+    int status = WiFi.status();
+
+    if (status != WL_CONNECTED) {
+      Serial.printf("WiFi disconnected (status: %d - %s)\n",
+                    status, getWiFiStatusName(status));
+
+      // If we have credentials and it's time to try again
+      if ((millis() - lastReconnectAttempt >= reconnectInterval)) {
+        Serial.println("Attempting WiFi reconnection...");
+        WiFi.disconnect();
+        char ssid[32] = { 0 };
+        char pass[32] = { 0 };
+        EEPROM.get(ADDR_WIFI_SSID, ssid);
+        EEPROM.get(ADDR_WIFI_PASS, pass);
+        String storedSSID = String(ssid);
+        String storedPass = String(pass);
+        loadConfig();
+        Serial.println("===================");
+        Serial.println(storedSSID);
+        Serial.println(storedPass);
+        Serial.println("===================");
+
+        connectToWiFi();
+
+        lastReconnectAttempt = millis();
+      }
+      // If no wifi, ensure AP mode is running
+      else if (WiFi.getMode() != WIFI_AP && WiFi.getMode() != WIFI_AP_STA) {
+        startAPMode();
+      } else {
+        Serial.println("Already in AP mode, skipping startAPMode()");
+      }
+    }
+
+    lastCheck = millis();
+  }
+}
+
+
+
 // --- Setup Function ---
 void setup() {
+  pinMode(D4, OUTPUT);
+  digitalWrite(D4, LOW);
+
   Serial.begin(115200);
   Serial.println();
   Serial.println("=== Water Tank Monitor with RS232 Commands ===");
@@ -1523,51 +1808,62 @@ void setup() {
   sensorSerial.setTimeout(50);  // Reduced timeout for faster response
 
   EEPROM.begin(EEPROM_SIZE);
-  loadConfig();
-
-  // Generate unique MQTT client ID
-  mqttClientId = String(MQTT_CLIENT_ID);
-  mqttClientId.replace("%06X", String(ESP.getChipId(), HEX));
-
-  // Try to connect using stored WiFi credentials
   char ssid[32] = { 0 };
   char pass[32] = { 0 };
   EEPROM.get(ADDR_WIFI_SSID, ssid);
   EEPROM.get(ADDR_WIFI_PASS, pass);
   String storedSSID = String(ssid);
   String storedPass = String(pass);
-  //storedPass = "komkritc";
   Serial.println(storedSSID);
   Serial.println(storedPass);
-  if (storedSSID.length() > 0) {
-    WiFi.mode(WIFI_STA);
-    WiFi.begin(storedSSID.c_str(), storedPass.c_str());
-    Serial.println("Connecting to WiFi...");
-    int attempts = 0;
-    while (WiFi.status() != WL_CONNECTED && attempts < 50) {
-      delay(200);
-      Serial.print(".");
-      attempts++;
+  loadConfig();
+
+  // Initialize LEDs
+  pinMode(WIFI_CONNECTED_LED, OUTPUT);
+  pinMode(WIFI_DISCONNECTED_LED, OUTPUT);
+  digitalWrite(WIFI_CONNECTED_LED, LOW);
+  digitalWrite(WIFI_DISCONNECTED_LED, LOW);
+
+  // Connect to WiFi or start AP
+  connectToWiFi();
+
+  // Generate unique MQTT client ID
+  mqttClientId = String(MQTT_CLIENT_ID);
+  mqttClientId.replace("%06X", String(ESP.getChipId(), HEX));
+
+
+  // if (storedSSID.length() > 0) {
+  //   WiFi.mode(WIFI_AP_STA);
+  //   WiFi.begin(storedSSID.c_str(), storedPass.c_str());
+  //   Serial.println("Connecting to WiFi...");
+  //   digitalWrite(D4, HIGH);
+  //   int attempts = 0;
+  //   while (WiFi.status() != WL_CONNECTED && attempts < 50) {
+  //     delay(200);
+  //     Serial.print(".");
+  //     digitalWrite(D4, !digitalRead(D4));
+  //     attempts++;
+  //   }
+
+  updateWiFiStatusLEDs();
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\nConnected to WiFi");
+    Serial.print("IP Address: ");
+    Serial.println(WiFi.localIP());
+
+    // Initialize MQTT if enabled
+    if (MQTT_ENABLED) {
+      mqttClient.setServer(MQTT_SERVER, MQTT_PORT);
+      mqttClient.setBufferSize(512);  // Increase buffer size for larger messages
     }
 
-    if (WiFi.status() == WL_CONNECTED) {
-      Serial.println("\nConnected to WiFi");
-      Serial.print("IP Address: ");
-      Serial.println(WiFi.localIP());
-
-      // Initialize MQTT if enabled
-      if (MQTT_ENABLED) {
-        mqttClient.setServer(MQTT_SERVER, MQTT_PORT);
-        mqttClient.setBufferSize(512);  // Increase buffer size for larger messages
-      }
-
-      if (MDNS.begin(DEVICE_NAME)) {
-        Serial.println("mDNS responder started");
-      } else {
-        Serial.println("Error setting up mDNS responder!");
-      }
+    if (MDNS.begin(DEVICE_NAME)) {
+      Serial.println("mDNS responder started");
+    } else {
+      Serial.println("Error setting up mDNS responder!");
     }
   }
+
 
   // Fall back to AP mode if no credentials or connection failed
   // In setup():
@@ -1685,6 +1981,7 @@ void setup() {
   // Initialize serial command buffer
   serialBufferIndex = 0;
   memset(serialCommandBuffer, 0, SERIAL_COMMAND_BUFFER_SIZE);
+  updateWiFiStatusLEDs();
 }
 
 // --- Optimized Main Loop ---
@@ -1694,33 +1991,35 @@ void loop() {
   static bool sensorHealthy = true;
 
   MDNS.update();  // Keep mDNS service running
+  checkWiFiConnection();
+  updateWiFiStatusLEDs();
 
   unsigned long currentTime = millis();
 
-  // Handle serial commands (high priority)
   handleSerialInput();
-
-  // Handle OTA and web server (high priority)
   ArduinoOTA.handle();
-
   server.handleClient();
+
   if (WiFi.getMode() == WIFI_AP || WiFi.getMode() == WIFI_AP_STA) {
     dnsServer.processNextRequest();
   }
 
-  // Handle MQTT connection and publishing
+  // Handle MQTT only if WiFi is connected
   if (MQTT_ENABLED && WiFi.status() == WL_CONNECTED) {
     if (!mqttClient.connected()) {
-      mqttReconnect();
-    }
-    mqttClient.loop();
+      mqttReconnect();  // Non-blocking now
+    } else {
+      mqttClient.loop();
 
-    // Publish data at regular intervals
-    if (currentTime - lastMqttPublishTime >= MQTT_PUBLISH_INTERVAL) {
-      publishMqttData();
-      lastMqttPublishTime = currentTime;
+      // Publish data at regular intervals (using your existing lastMqttPublishTime)
+      if (millis() - lastMqttPublishTime >= MQTT_PUBLISH_INTERVAL) {
+        if (publishMqttData()) {
+          lastMqttPublishTime = millis();  // Update the timestamp on success
+        }
+      }
     }
   }
+
 
   // Handle sensor readings optimally
   handleSensorReading();
