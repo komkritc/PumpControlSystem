@@ -27,12 +27,8 @@
  * - Optional: Secondary ESP8266 for remote monitoring
  *
  * Designed by: Komkrit Chooraung
- * Date: 16-8-2025
+ * Date: 11-8-2025
  * Version: 2.1 (Added RS232 Commands)
- * Version: 3.1 (Added WiFi SSID Connection)
- * Version: 3.2 (Added WiFi SSID Connection Config Page)
- * Version: 3.2 (Added MQTT)
- * Version: 1.0rc (1st Release Candidate)
  */
 
 #include <ESP8266WiFi.h>
@@ -44,31 +40,18 @@
 #include <DNSServer.h>
 #include <ESP8266mDNS.h>  // Add this line with the other includes
 
-// --- Config Macros ---
-#define DEVICE_NAME "TankMonitor888"  // Device name (AP/mDNS/OTA)
-#define WIFI_AP_PASSWORD "12345678"   // AP mode password
-#define OTA_PASSWORD "12345678"       // OTA update password (optional)
-
 // --- Constants ---
-#define EEPROM_SIZE 128
+#define EEPROM_SIZE 64
 #define ADDR_WIDTH 0       // float (4 bytes)
 #define ADDR_HEIGHT 4      // float (4 bytes)
 #define ADDR_VOL_FACTOR 8  // float (4 bytes)
 #define ADDR_CALIB 12      // int (4 bytes)
-#define ADDR_WIFI_SSID 16  // 32 bytes
-#define ADDR_WIFI_PASS 48  // 32 bytes
-#define ADDR_WIFI_MAC 80   // 6 bytes for MAC address
 
-#define LED_BLUE D4   // Status/Activity LED
-#define LED_RED D7    // Error/AP Mode LED
-#define LED_GREEN D8  // WiFi Connected LED
-#define LED_ON HIGH   // Assuming common cathode (LOW turns on)
-#define LED_OFF LOW
 #define RX_PIN D1
 #define TX_PIN D2
 #define SENSOR_READ_TIMEOUT 100        // ms
 #define SERIAL_INPUT_TIMEOUT 5000      // ms
-#define UPDATE_INTERVAL 3000           // ms for web dashboard updates
+#define UPDATE_INTERVAL 2000           // ms for web dashboard updates
 #define SERIAL_COMMAND_BUFFER_SIZE 32  // Buffer size for serial commands
 
 const byte DNS_PORT = 53;  // DNS server port for captive portal
@@ -89,19 +72,6 @@ float volumeFactor = TANK_PRESETS[0][2];
 int calibration_mm = 0;
 float percent = 0.0f;
 float volume = 0.0f;
-
-struct BenchmarkResults {
-  float successRate;
-  unsigned long avgTime;
-  unsigned long minTime;
-  unsigned long maxTime;
-  int iterations;
-  bool running;
-  String lastResults;
-  String individualResults; // Add this line
-} benchmarkResults;
-
-String lastBenchmarkResults = "";
 
 // Sensor data
 uint16_t mm = 0;
@@ -168,44 +138,6 @@ struct PerformanceMetrics {
 };
 
 PerformanceMetrics performanceMetrics;
-
-// ===== UTILITY FUNCTIONS =====
-void blinkBlueLED(int count, int delayTime = 200) {
-  for (int i = 0; i < count; i++) {
-    digitalWrite(LED_BLUE, LED_ON);
-    delay(delayTime);
-    digitalWrite(LED_BLUE, LED_OFF);
-    if (i < count - 1) delay(delayTime);
-  }
-}
-
-void blinkGreenLED(int count, int delayTime = 200) {
-  for (int i = 0; i < count; i++) {
-    digitalWrite(LED_GREEN, LED_ON);
-    delay(delayTime);
-    digitalWrite(LED_GREEN, LED_OFF);
-    if (i < count - 1) delay(delayTime);
-  }
-}
-
-void blinkRedLED(int count, int delayTime = 200) {
-  for (int i = 0; i < count; i++) {
-    digitalWrite(LED_RED, LED_ON);
-    delay(delayTime);
-    digitalWrite(LED_RED, LED_OFF);
-    if (i < count - 1) delay(delayTime);
-  }
-}
-
-void initLEDs() {
-  pinMode(LED_RED, OUTPUT);
-  pinMode(LED_GREEN, OUTPUT);
-  pinMode(LED_BLUE, OUTPUT);
-  digitalWrite(LED_RED, LOW);
-  digitalWrite(LED_GREEN, LOW);
-  digitalWrite(LED_BLUE, LOW);
-}
-
 
 // --- Buffered Reading Manager ---
 class SensorReadingManager {
@@ -328,34 +260,58 @@ void processSerialCommand(String command) {
   command.toLowerCase();
 
   if (command == "mac") {
-    // ... existing mac command code ...
+    // Display MAC address in the requested format
+    String macStr = WiFi.macAddress();
+    macStr.replace(":", ", 0x");
+    macStr = "0x" + macStr;
+    Serial.printf("MAC[] = { %s }\n", macStr.c_str());
+
+    // Also show ESP-NOW peer MAC
+    Serial.printf("ESP-NOW Peer MAC[] = { 0x%02X, 0x%02X, 0x%02X, 0x%02X, 0x%02X, 0x%02X }\n",
+                  senderMAC[0], senderMAC[1], senderMAC[2],
+                  senderMAC[3], senderMAC[4], senderMAC[5]);
+
   } else if (command == "read") {
-    // ... existing read command code ...
+    // Read sensor and display value
+    Serial.println("Reading sensor...");
+
+    uint16_t read_mm;
+    float read_cm;
+
+    // Try burst reading for immediate response
+    bool success = readDistanceBurst(read_mm, read_cm, 3);
+
+    if (success) {
+      // Update global variables
+      mm = read_mm;
+      cm = read_cm;
+      updateMeasurements();
+
+      Serial.printf("Sensor Reading:\n");
+      Serial.printf("  Distance: %.1f cm (%d mm)\n", cm, mm);
+      Serial.printf("  Water Level: %.1f%%\n", percent);
+      Serial.printf("  Volume: %.1f L\n", volume);
+      Serial.printf("  Calibration: %.1f cm\n", calibration_mm / 10.0f);
+    } else {
+      Serial.println("Error: Failed to read sensor");
+    }
+
   } else if (command == "benchmark") {
     // Run benchmark
     Serial.println("Starting sensor benchmark...");
     runSerialBenchmark(30);  // Run 30 iterations by default
 
-    // Show stored results
-    if (benchmarkResults.lastResults.length() > 0) {
-      Serial.println("\nLast Benchmark Results:");
-      Serial.println(benchmarkResults.lastResults);
-    }
-
   } else if (command == "reset") {
-    // ... existing reset command code ...
-  } else if (command == "benchresults") {
-    // Show last benchmark results
-    if (benchmarkResults.lastResults.length() > 0) {
-      Serial.println("\nLast Benchmark Results:");
-      Serial.println(benchmarkResults.lastResults);
-    } else {
-      Serial.println("No benchmark results available. Run benchmark first.");
-    }
+    // Reset ESP
+    Serial.println("Resetting ESP8266...");
+    Serial.flush();
+    delay(100);
+    ESP.restart();
+
   } else if (command.length() > 0) {
     // Unknown command
     Serial.printf("Unknown command: '%s'\n", command.c_str());
-    Serial.println("Available commands: mac, read, benchmark, benchresults, reset");
+    Serial.println("Available commands: mac, read, benchmark, reset");
   }
 }
 
@@ -602,7 +558,6 @@ void handleESPNowRequest() {
   if (pendingDistanceRequest || pendingDistanceRequest_2) {
     uint16_t burst_mm;
     float burst_cm;
-    blinkBlueLED(1);
 
     unsigned long startTime = millis();
 
@@ -623,7 +578,6 @@ void handleESPNowRequest() {
         sendESPNowResponse(true, json.c_str());
       } else if (pendingDistanceRequest_2) {
         sendESPNowResponse(true, jsonDataOut.c_str());
-        blinkGreenLED(1);
       }
     } else {
       sendESPNowResponse(false);
@@ -672,8 +626,7 @@ void handleRoot() {
   String waterColor = (percent < 20) ? "#ff4444" : "#4285f4";
   float maxVolume = volumeFactor * tankHeight;
 
-  // PROGMEM strings for static parts
-  static const char html_header[] PROGMEM = R"=====(
+  String html = FPSTR(R"=====(
 <!DOCTYPE html>
 <html>
 <head>
@@ -698,15 +651,13 @@ void handleRoot() {
     .tank-labels { display: flex; flex-direction: column; justify-content: flex-start; align-items: flex-start; margin-top: 5px;}
     .tank-label { font-size: 12px; color: #666; }
     .current-level { position: absolute; left: 50%; transform: translateX(-50%); bottom: calc(%PERCENT%% - 12px); font-size: 12px; background: white; padding: 2px 5px; border-radius: 3px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); z-index: 2; }
-    .footer { margin-top: 2rem; padding-top: 1.5rem; border-top: 1px solid #eee; font-size: 0.9rem; }
-    .footer-links { display: flex; justify-content: center; gap: 1.5rem; margin-bottom: 1.5rem; flex-wrap: wrap; }
-    .footer-link { display: flex; align-items: center; gap: 0.5rem; color: #4361ee; text-decoration: none; font-weight: 500; transition: color 0.2s; }
-    .footer-link:hover { color: #3a56d4; }
-    .icon { width: 18px; height: 18px; fill: currentColor; }
-    .footer-meta { text-align: center; color: #666; line-height: 1.6; }
+    .footer { margin-top: 20px; font-size: 12px; color: #999; text-align: center; border-top: 1px solid #eee; padding-top: 15px; }
+    .config-link { display: inline-block; margin: 5px; color: #4285f4; text-decoration: none; font-weight: 500; }
+    .config-link:hover { text-decoration: underline; }
     .last-update { font-size: 12px; color: #999; text-align: right; margin-top: 10px; }
     .health-indicator { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 5px; }
     .health-healthy { background-color: #4CAF50; }
+    .health-warning { background-color: #FF9800; }
     .health-error { background-color: #F44336; }
   </style>
 </head>
@@ -757,96 +708,81 @@ void handleRoot() {
         <span class="tank-label">0 L (MIN)</span>
       </div>
     </div>
-)=====";
-
-  static const char html_footer[] PROGMEM = R"=====(
+    
     <div class="footer">
-      <div class="footer-links">
-        <a href="/config" class="footer-link">
-          <svg class="icon" viewBox="0 0 24 24"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.22-.2-.4-.43-.4h-3.84c-.23 0-.39.18-.43.4l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.04.22.2.4.43.4h3.84c.23 0 .39-.18.43-.4l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>
-          Configure
-        </a>
-        <a href="/sensor-stats" class="footer-link">
-          <svg class="icon" viewBox="0 0 24 24"><path d="M16 11c1.66 0 3-1.34 3-3s-1.34-3-3-3-3 1.34-3 3 1.34 3 3 3zM8 11c1.66 0 3-1.34 3-3s-1.34-3-3-3-3 1.34-3 3 1.34 3 3 3zM8 19c1.66 0 3-1.34 3-3s-1.34-3-3-3-3 1.34-3 3 1.34 3 3 3zM16 19c1.66 0 3-1.34 3-3s-1.34-3-3-3-3 1.34-3 3 1.34 3 3 3z"/></svg>
-          Stats
-        </a>
-        <a href="/benchmark" class="footer-link">
-          <svg class="icon" viewBox="0 0 24 24"><path d="M15.6 10.79c.97-.67 1.65-1.77 1.65-2.79 0-2.26-1.75-4-4-4H7v14h7.04c2.09 0 3.71-1.7 3.71-3.79 0-1.52-.86-2.82-2.15-3.42zM10 6.5h3c.83 0 1.5.67 1.5 1.5s-.67 1.5-1.5 1.5h-3v-3zm3.5 9H10v-3h3.5c.83 0 1.5.67 1.5 1.5s-.67 1.5-1.5 1.5z"/></svg>
-          Benchmark
-        </a>
-      </div>
-      <div class="footer-meta">
-        <p class="footer-meta-item">MAC: %MAC_ADDRESS%</p>
-        <p class="footer-meta-item">Uptime: <span id="uptimeValue">%UPTIME%</span></p>
-      </div>
+      <p>MAC: %MAC_ADDRESS%<br>
+      Uptime: <span id="uptimeValue">%UPTIME%</span><br>
+      Valid Readings: <span id="validReadings">%VALID_READINGS%</span></p>
+      <a href="/config" class="config-link">Configure Tank</a>
+      <a href="/sensor-stats" class="config-link">Sensor Stats</a>
+      <a href="/benchmark" class="config-link">Benchmark</a>
     </div>
-
-    <script>
-      function updateDashboard() {
-        fetch('/data')
-          .then(response => response.json())
-          .then(data => {
-            const waterColor = data.percent < 20 ? '#ff4444' : '#4285f4';
-            
-            document.getElementById('percentValue').textContent = data.percent.toFixed(1) + '%';
-            document.getElementById('distanceValue').textContent = data.distance.toFixed(1) + ' cm';
-            document.getElementById('volumeValue').textContent = data.volume.toFixed(1) + ' L';
-            document.getElementById('uptimeValue').textContent = data.uptime;
-            
-            const waterLevel = document.getElementById('waterLevel');
-            const currentLevel = document.getElementById('currentLevel');
-            const gauge = document.getElementById('gauge');
-            const healthIndicator = document.getElementById('healthIndicator');
-            
-            waterLevel.style.height = data.percent + '%';
-            waterLevel.style.backgroundColor = waterColor;
-            
-            currentLevel.style.bottom = 'calc(' + data.percent + '% - 12px)';
-            currentLevel.textContent = data.volume.toFixed(1) + ' L (' + data.percent.toFixed(1) + '%)';
-            
-            gauge.style.setProperty('--water-color', waterColor);
-            gauge.style.setProperty('--water-level', data.percent + '%');
-            
-            // Update health indicator
-            healthIndicator.className = 'health-indicator ' + (data.sensor_health ? 'health-healthy' : 'health-error');
-            
-            const now = new Date();
-            document.getElementById('lastUpdate').innerHTML = 
-              '<span class="health-indicator ' + (data.sensor_health ? 'health-healthy' : 'health-error') + '"></span>' +
-              'Last update: ' + now.toLocaleTimeString();
-          })
-          .catch(error => {
-            console.error('Error fetching data:', error);
-            document.getElementById('healthIndicator').className = 'health-indicator health-error';
-          });
-      }
-
-      updateDashboard();
-      setInterval(updateDashboard, %UPDATE_INTERVAL%);
-    </script>
   </div>
+
+  <script>
+    function updateDashboard() {
+      fetch('/data')
+        .then(response => response.json())
+        .then(data => {
+          const waterColor = data.percent < 20 ? '#ff4444' : '#4285f4';
+          
+          document.getElementById('percentValue').textContent = data.percent.toFixed(1) + '%';
+          document.getElementById('distanceValue').textContent = data.distance.toFixed(1) + ' cm';
+          document.getElementById('volumeValue').textContent = data.volume.toFixed(1) + ' L';
+          document.getElementById('uptimeValue').textContent = data.uptime;
+          document.getElementById('validReadings').textContent = data.valid_readings || '0';
+          
+          const waterLevel = document.getElementById('waterLevel');
+          const currentLevel = document.getElementById('currentLevel');
+          const gauge = document.getElementById('gauge');
+          const healthIndicator = document.getElementById('healthIndicator');
+          
+          waterLevel.style.height = data.percent + '%';
+          waterLevel.style.backgroundColor = waterColor;
+          
+          currentLevel.style.bottom = 'calc(' + data.percent + '% - 12px)';
+          currentLevel.textContent = data.volume.toFixed(1) + ' L (' + data.percent.toFixed(1) + '%)';
+          
+          gauge.style.setProperty('--water-color', waterColor);
+          gauge.style.setProperty('--water-level', data.percent + '%');
+          
+          // Update health indicator
+          if (data.sensor_health) {
+            healthIndicator.className = 'health-indicator health-healthy';
+          } else {
+            healthIndicator.className = 'health-indicator health-error';
+          }
+          
+          const now = new Date();
+          document.getElementById('lastUpdate').innerHTML = 
+            '<span class="health-indicator ' + (data.sensor_health ? 'health-healthy' : 'health-error') + '"></span>' +
+            'Last update: ' + now.toLocaleTimeString();
+        })
+        .catch(error => {
+          console.error('Error fetching data:', error);
+          const healthIndicator = document.getElementById('healthIndicator');
+          healthIndicator.className = 'health-indicator health-error';
+        });
+    }
+
+    updateDashboard();
+    setInterval(updateDashboard, %UPDATE_INTERVAL%);
+  </script>
 </body>
 </html>
-)=====";
+)=====");
 
-  // Build the response efficiently
-  String html = FPSTR(html_header);
-
-  // Replace placeholders efficiently
+  // Replace placeholders with actual values
   html.replace("%WATER_COLOR%", waterColor);
   html.replace("%PERCENT%", String(percent, 1));
   html.replace("%DISTANCE%", String(cm, 1));
   html.replace("%VOLUME%", String(volume, 1));
-  html.replace("%TANK_WIDTH%", String(tankWidth, 1));
-  html.replace("%TANK_HEIGHT%", String(tankHeight, 1));
+  html.replace("%TANK_WIDTH%", String(tankWidth));
+  html.replace("%TANK_HEIGHT%", String(tankHeight));
   html.replace("%MAX_VOLUME%", String(maxVolume, 1));
-
-  // Add footer
-  html += FPSTR(html_footer);
-
-  // Replace footer placeholders
   html.replace("%MAC_ADDRESS%", WiFi.macAddress());
   html.replace("%UPTIME%", formatRuntime(millis()));
+  html.replace("%VALID_READINGS%", String(sensorManager.getValidReadingsCount()));
   html.replace("%UPDATE_INTERVAL%", String(UPDATE_INTERVAL));
 
   server.send(200, "text/html", html);
@@ -1107,317 +1043,55 @@ void handleConfig() {
 
 
 // Benchmarking Function (for web)
-void runSensorBenchmark(int iterations = 20) {
-  // Initialize benchmark state
-  benchmarkResults.running = true;
-  benchmarkResults.iterations = iterations;
-  benchmarkResults.individualResults = "";
-  
-  // Reset performance metrics
+void runSensorBenchmark(int iterations = 50) {
+  Serial.println("{\"benchmark\":\"starting\"}");
   performanceMetrics.reset();
 
-  Serial.println("\nStarting benchmark with " + String(iterations) + " iterations...");
-  Serial.println("----------------------------------------");
-
-  // Clear previous results
-  lastBenchmarkResults = "";
-
-  // Run all test iterations
   for (int i = 0; i < iterations; i++) {
     uint16_t test_mm;
     float test_cm;
 
-    // Take measurement
     unsigned long startTime = micros();
     bool success = readDistanceBurst(test_mm, test_cm, 1);
     unsigned long endTime = micros();
+
     unsigned long readTime = endTime - startTime;
+    performanceMetrics.addMeasurement(readTime / 1000, success);  // Convert to milliseconds
 
-    // Update metrics
-    performanceMetrics.addMeasurement(readTime / 1000, success);
+    Serial.printf("{\"iteration\":%d,\"time_ms\":%lu,\"success\":%s,\"distance\":%.1f}\n",
+                  i + 1, readTime / 1000, success ? "true" : "false",
+                  success ? test_cm : 0.0f);
 
-    // Format individual test result
-    String testResult = "[" + String(i+1) + "/" + String(iterations) + "] ";
-    testResult += success ? "SUCCESS" : "FAILED";
-    testResult += " - " + String(success ? test_cm : 0.0f, 1) + " cm";
-    testResult += " (" + String(readTime/1000) + " ms)";
-
-    // Store for web display
-    benchmarkResults.individualResults += testResult + "\n";
-    
-    // Output to serial immediately
-    Serial.println(testResult);
-
-    delay(100); // Short delay between tests
+    delay(100);  // Small delay between tests
   }
 
-  // Calculate and store summary results
-  benchmarkResults.successRate = performanceMetrics.getSuccessRate();
-  benchmarkResults.avgTime = performanceMetrics.averageReadTime;
-  benchmarkResults.minTime = performanceMetrics.minReadTime;
-  benchmarkResults.maxTime = performanceMetrics.maxReadTime;
-  
-  // Format complete results
-  benchmarkResults.lastResults = 
-    "=== Benchmark Summary ===\n" +
-    String("Iterations:  ") + iterations + "\n" +
-    String("Success Rate: ") + String(benchmarkResults.successRate, 1) + "%\n" +
-    String("Average Time: ") + benchmarkResults.avgTime + " ms\n" +
-    String("Min Time:     ") + benchmarkResults.minTime + " ms\n" +
-    String("Max Time:     ") + benchmarkResults.maxTime + " ms\n" +
-    "=========================\n\n" +
-    "=== Individual Test Results ===\n" +
-    benchmarkResults.individualResults +
-    "===============================";
-
-  // Store results in global variable for web access
-  lastBenchmarkResults = benchmarkResults.lastResults;
-
-  // Final serial output
-  Serial.println("\nBenchmark Complete");
-  Serial.println("------------------");
-  Serial.printf("Success Rate: %.1f%%\n", benchmarkResults.successRate);
-  Serial.printf("Average Time: %lu ms\n", benchmarkResults.avgTime);
-  Serial.printf("Min Time:     %lu ms\n", benchmarkResults.minTime);
-  Serial.printf("Max Time:     %lu ms\n", benchmarkResults.maxTime);
-  Serial.println("------------------");
-
-  benchmarkResults.running = false;
+  Serial.printf("{\"benchmark_complete\":{\"success_rate\":%.1f,\"avg_time_ms\":%lu,\"min_time_ms\":%lu,\"max_time_ms\":%lu}}\n",
+                performanceMetrics.getSuccessRate(),
+                performanceMetrics.averageReadTime,
+                performanceMetrics.minReadTime,
+                performanceMetrics.maxReadTime);
 }
-
 
 // Benchmark endpoint handler
 void handleBenchmark() {
   if (server.hasArg("run")) {
     int iterations = server.hasArg("iterations") ? server.arg("iterations").toInt() : 20;
-    iterations = constrain(iterations, 5, 100);
-    
-    // Show running page
-    String runningHtml = R"=====(
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Benchmark Running</title>
-<style>
-        body {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            max-width: 800px;
-            margin: 0 auto;
-            padding: 20px;
-            color: #333;
-            line-height: 1.6;
-            background-color: #f5f5f5;
-        }
-        .card {
-            background: white;
-            border-radius: 8px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-            padding: 25px;
-            margin-top: 20px;
-        }
-        h2 {
-            color: #2c3e50;
-            margin-top: 0;
-            border-bottom: 1px solid #eee;
-            padding-bottom: 10px;
-        }
-        .form-group {
-            margin-bottom: 20px;
-        }
-        label {
-            display: block;
-            margin-bottom: 5px;
-            font-weight: 500;
-        }
-        input[type="number"] {
-            width: 100px;
-            padding: 8px;
-            border: 1px solid #ddd;
-            border-radius: 4px;
-        }
-        input[type="submit"] {
-            background-color: #3498db;
-            color: white;
-            border: none;
-            padding: 10px 20px;
-            border-radius: 4px;
-            cursor: pointer;
-            font-size: 16px;
-            transition: background-color 0.3s;
-        }
-        input[type="submit"]:hover {
-            background-color: #2980b9;
-        }
-        .info-box {
-            background-color: #f8f9fa;
-            border-left: 4px solid #3498db;
-            padding: 15px;
-            margin: 20px 0;
-        }
-        .back-link {
-            display: inline-block;
-            margin-top: 20px;
-            color: #3498db;
-            text-decoration: none;
-        }
-        .back-link:hover {
-            text-decoration: underline;
-        }
-    </style>
-    <script>
-        function checkResults() {
-            fetch('/benchmark-status')
-                .then(response => response.json())
-                .then(data => {
-                    if (data.complete) {
-                        window.location.href = '/benchmark?results=1';
-                    } else {
-                        setTimeout(checkResults, 1000);
-                    }
-                });
-        }
-        setTimeout(checkResults, 2000);
-    </script>
-</head>
-<body>
-    <div class="card">
-        <h2>Running Benchmark</h2>
-        <div class="spinner"></div>
-        <div class="progress-text">
-            Running )=====";
-    runningHtml += String(iterations);
-    runningHtml += R"=====( test iterations...
-            <br>Please wait...
-        </div>
-    </div>
-</body>
-</html>
-)=====";
-    
-    server.send(200, "text/html", runningHtml);
-    
-    // Run benchmark
-    runSensorBenchmark(iterations);
-    return;
-  }
+    iterations = constrain(iterations, 5, 100);  // Limit range
 
-  // Add a new endpoint to check benchmark status
-  if (server.hasArg("results")) {
+    String response = "Benchmark running with " + String(iterations) + " iterations. Check serial output.";
+    server.send(200, "text/plain", response);
+
+    // Run benchmark in background
+    runSensorBenchmark(iterations);
+  } else {
     String html = R"=====(
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Benchmark Results</title>
-<style>
-        body {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            max-width: 800px;
-            margin: 0 auto;
-            padding: 20px;
-            color: #333;
-            line-height: 1.6;
-            background-color: #f5f5f5;
-        }
-        .card {
-            background: white;
-            border-radius: 8px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-            padding: 25px;
-            margin-top: 20px;
-        }
-        h2 {
-            color: #2c3e50;
-            margin-top: 0;
-            border-bottom: 1px solid #eee;
-            padding-bottom: 10px;
-        }
-        .form-group {
-            margin-bottom: 20px;
-        }
-        label {
-            display: block;
-            margin-bottom: 5px;
-            font-weight: 500;
-        }
-        input[type="number"] {
-            width: 100px;
-            padding: 8px;
-            border: 1px solid #ddd;
-            border-radius: 4px;
-        }
-        input[type="submit"] {
-            background-color: #3498db;
-            color: white;
-            border: none;
-            padding: 10px 20px;
-            border-radius: 4px;
-            cursor: pointer;
-            font-size: 16px;
-            transition: background-color 0.3s;
-        }
-        input[type="submit"]:hover {
-            background-color: #2980b9;
-        }
-        .info-box {
-            background-color: #f8f9fa;
-            border-left: 4px solid #3498db;
-            padding: 15px;
-            margin: 20px 0;
-        }
-        .back-link {
-            display: inline-block;
-            margin-top: 20px;
-            color: #3498db;
-            text-decoration: none;
-        }
-        .back-link:hover {
-            text-decoration: underline;
-        }
-    </style>
-</head>
-<body>
-    <div class="card">
-        <h2>Benchmark Results</h2>
-        <div class="results">
-)=====";
-
-    if (lastBenchmarkResults.length() > 0) {
-      // Format results with HTML
-      String displayResults = lastBenchmarkResults;
-      displayResults.replace("SUCCESS", "<span class='success'>SUCCESS</span>");
-      displayResults.replace("FAILED", "<span class='failure'>FAILED</span>");
-      displayResults.replace("\n", "<br>");
-      html += displayResults;
-    } else {
-      html += "Benchmark results not available. Please run the benchmark again.";
-    }
-
-    html += R"=====(
-        </div>
-        <a href="/benchmark" class="back-link">← Run Another Benchmark</a>
-        <a href="/" class="back-link">← Back to Dashboard</a>
-    </div>
-</body>
-</html>
-)=====";
-
-    server.send(200, "text/html", html);
-    return;
-  }
-
-  // Show the benchmark form
-  String html = R"=====(
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Sensor Benchmark Tool</title>
-<style>
+    <title>Sensor Benchmark</title>
+    <style>
         body {
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             max-width: 800px;
@@ -1487,328 +1161,33 @@ void handleBenchmark() {
 <body>
     <div class="card">
         <h2>Sensor Benchmark Tool</h2>
-        <form method="get">
-            <div class="form-group">
+        
+        <div class="form-group">
+            <form method="get">
                 <label for="iterations">Iteration Count (5-100):</label>
-                <input type="number" id="iterations" name="iterations" value=")=====";
-  
-  html += server.hasArg("iterations") ? server.arg("iterations") : "20";
-  
-  html += R"=====(" min="5" max="100">
-            </div>
-            <input type="hidden" name="run" value="1">
-            <input type="submit" value="Run Benchmark">
-        </form>
+                <input type="number" id="iterations" name="iterations" value="20" min="5" max="100">
+                
+                <input type="hidden" name="run" value="1">
+                <br><br>
+                <input type="submit" value="Start Benchmark">
+            </form>
+        </div>
+        
+        <div class="info-box">
+            <strong>Note:</strong> The benchmark will run with the specified number of iterations.
+            Results will be displayed in the serial monitor output.
+            Please don't navigate away during testing.
+        </div>
+        
         <a href="/" class="back-link">← Back to Dashboard</a>
     </div>
 </body>
 </html>
 )=====";
 
-  server.send(200, "text/html", html);
-}
-
-// Add this new handler function
-void handleBenchmarkStatus() {
-  String json = "{";
-  json += "\"complete\":";
-  json += (lastBenchmarkResults.length() > 0) ? "true" : "false";
-  json += "}";
-  server.send(200, "application/json", json);
-}
-
-
-void handleWiFiSetup() {
-  if (server.hasArg("save")) {
-    String newSSID = server.arg("ssid");
-    String newPass = server.arg("password");
-    String newMAC = server.arg("mac");
-
-    char ssidBuf[32] = { 0 }, passBuf[32] = { 0 };
-    strlcpy(ssidBuf, newSSID.c_str(), 32);
-    strlcpy(passBuf, newPass.c_str(), 32);
-
-    // Parse MAC address
-    uint8_t mac[6];
-    if (newMAC.length() == 17) {
-      // Format: "XX:XX:XX:XX:XX:XX"
-      sscanf(newMAC.c_str(), "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx",
-             &mac[0], &mac[1], &mac[2], &mac[3], &mac[4], &mac[5]);
-      EEPROM.put(ADDR_WIFI_MAC, mac);
-    }
-
-    EEPROM.put(ADDR_WIFI_SSID, ssidBuf);
-    EEPROM.put(ADDR_WIFI_PASS, passBuf);
-
-    if (EEPROM.commit()) {
-      Serial.println("WiFi credentials and MAC saved to EEPROM");
-
-      // Send reboot countdown page
-      String html = R"=====(
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Settings Saved</title>
-  <style>
-    :root {
-      --primary: #4361ee;
-      --success: #4bb543;
-    }
-    body {
-      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-      background-color: #f5f5f5;
-      display: flex;
-      justify-content: center;
-      align-items: center;
-      height: 100vh;
-      margin: 0;
-      text-align: center;
-    }
-    .card {
-      background: white;
-      padding: 2rem;
-      border-radius: 8px;
-      box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-      max-width: 500px;
-      width: 100%;
-    }
-    .success-icon {
-      color: var(--success);
-      font-size: 3rem;
-      margin-bottom: 1rem;
-    }
-    h1 {
-      color: var(--primary);
-      margin-bottom: 1rem;
-    }
-    p {
-      margin-bottom: 1.5rem;
-      color: #555;
-    }
-    .countdown {
-      font-size: 1.2rem;
-      font-weight: bold;
-      color: var(--primary);
-    }
-    .progress-bar {
-      height: 4px;
-      background: #e0e0e0;
-      border-radius: 2px;
-      margin-top: 1rem;
-      overflow: hidden;
-    }
-    .progress {
-      height: 100%;
-      background: var(--primary);
-      width: 100%;
-      animation: progress 5s linear forwards;
-    }
-    @keyframes progress {
-      from { width: 100%; }
-      to { width: 0%; }
-    }
-  </style>
-</head>
-<body>
-  <div class="card">
-    <div class="success-icon">✓</div>
-    <h1>Settings Saved Successfully</h1>
-    <p>The device will reboot to apply changes.</p>
-    <div class="countdown" id="countdown">Rebooting in 5 seconds...</div>
-    <div class="progress-bar">
-      <div class="progress"></div>
-    </div>
-  </div>
-  <script>
-    let seconds = 5;
-    const countdownEl = document.getElementById('countdown');
-    
-    const timer = setInterval(() => {
-      seconds--;
-      countdownEl.textContent = `Rebooting in ${seconds} second${seconds !== 1 ? 's' : ''}...`;
-      
-      if (seconds <= 0) {
-        clearInterval(timer);
-      }
-    }, 1000);
-    
-    // Redirect after 5 seconds
-    setTimeout(() => {
-      window.location.href = '/';
-    }, 5000);
-  </script>
-</body>
-</html>
-)=====";
-      server.send(200, "text/html", html);
-      delay(5000);
-      ESP.restart();
-    } else {
-      server.send(200, "text/html", "<h1>Error saving settings!</h1>");
-    }
-    return;
+    server.send(200, "text/html", html);
   }
-
-  char ssidBuf[32] = { 0 }, passBuf[32] = { 0 };
-  uint8_t mac[6] = { 0 };
-
-  EEPROM.get(ADDR_WIFI_SSID, ssidBuf);
-  EEPROM.get(ADDR_WIFI_PASS, passBuf);
-  EEPROM.get(ADDR_WIFI_MAC, mac);
-
-  // Format MAC address for display
-  String macStr;
-  if (mac[0] != 0 || mac[1] != 0 || mac[2] != 0 || mac[3] != 0 || mac[4] != 0 || mac[5] != 0) {
-    char macBuf[18];
-    sprintf(macBuf, "%02X:%02X:%02X:%02X:%02X:%02X",
-            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-    macStr = String(macBuf);
-  }
-
-  String html = R"=====(
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>WiFi Setup</title>
-  <style>
-    :root {
-      --primary: #4361ee;
-      --light: #f8f9fa;
-      --dark: #212529;
-      --border: #dee2e6;
-      --success: #4bb543;
-    }
-    * {
-      box-sizing: border-box;
-      margin: 0;
-      padding: 0;
-      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-    }
-    body {
-      background-color: #f5f5f5;
-      color: var(--dark);
-      line-height: 1.6;
-      padding: 20px;
-    }
-    .container {
-      max-width: 500px;
-      margin: 30px auto;
-      background: white;
-      padding: 30px;
-      border-radius: 8px;
-      box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-    }
-    h2 {
-      color: var(--primary);
-      margin-bottom: 20px;
-      text-align: center;
-    }
-    .form-group {
-      margin-bottom: 20px;
-    }
-    label {
-      display: block;
-      margin-bottom: 5px;
-      font-weight: 500;
-    }
-    input[type="text"],
-    input[type="password"] {
-      width: 100%;
-      padding: 10px;
-      border: 1px solid var(--border);
-      border-radius: 4px;
-      font-size: 16px;
-    }
-    .input-hint {
-      font-size: 0.8rem;
-      color: #666;
-      margin-top: 5px;
-    }
-    input[type="submit"] {
-      background-color: var(--primary);
-      color: white;
-      border: none;
-      padding: 12px 20px;
-      border-radius: 4px;
-      cursor: pointer;
-      font-size: 16px;
-      width: 100%;
-      transition: background-color 0.3s;
-      margin-top: 10px;
-    }
-    input[type="submit"]:hover {
-      background-color: #3a56d4;
-    }
-    .back-link {
-      display: block;
-      text-align: center;
-      margin-top: 20px;
-      color: var(--primary);
-      text-decoration: none;
-    }
-    .back-link:hover {
-      text-decoration: underline;
-    }
-    .current-mac {
-      background: var(--light);
-      padding: 10px;
-      border-radius: 4px;
-      font-family: monospace;
-      margin-bottom: 15px;
-      text-align: center;
-    }
-  </style>
-</head>
-<body>
-  <div class="container">
-    <h2>Network Configuration</h2>
-    
-    <div class="current-mac">
-      Current MAC: )=====";
-  html += WiFi.macAddress();
-  html += R"=====(
-    </div>
-    
-    <form method="post" action="/wifi-setup">
-      <input type="hidden" name="save" value="1">
-      
-      <div class="form-group">
-        <label for="ssid">Network SSID</label>
-        <input type="text" id="ssid" name="ssid" value=")=====";
-  html += ssidBuf;
-  html += R"=====(" placeholder="Enter WiFi network name">
-      </div>
-      
-      <div class="form-group">
-        <label for="password">Password</label>
-        <input type="password" id="password" name="password" value=")=====";
-  html += passBuf;
-  html += R"=====(" placeholder="Enter WiFi password">
-      </div>
-      
-      <div class="form-group">
-        <label for="mac">Sensor MAC Address </label>
-        <input type="text" id="mac" name="mac" value=")=====";
-  html += macStr;
-  html += R"=====(" placeholder="XX:XX:XX:XX:XX:XX">
-        <div class="input-hint">Format: 00:11:22:33:44:55 (leave empty to keep current)</div>
-      </div>
-      
-      <input type="submit" value="Save Settings">
-    </form>
-    <a href="/" class="back-link">Back to Dashboard</a>
-  </div>
-</body>
-</html>
-)=====";
-
-  server.send(200, "text/html", html);
 }
-
 // Optimized sensor handling
 void handleSensorReading() {
   static unsigned long lastWebUpdate = 0;
@@ -1831,49 +1210,13 @@ void handleSensorReading() {
   handleESPNowRequest();
 }
 
-void handleNotFound() {
-  // Check if this is a captive portal request
-  if (server.hostHeader() != WiFi.softAPIP().toString() && !server.hostHeader().endsWith(".local")) {
-    // Redirect to our captive portal
-    server.sendHeader("Location", String("http://") + WiFi.softAPIP().toString(), true);
-    server.send(302, "text/plain", "");
-  } else {
-    // Normal 404 handling
-    String message = "File Not Found\n\n";
-    message += "URI: ";
-    message += server.uri();
-    message += "\nMethod: ";
-    message += (server.method() == HTTP_GET) ? "GET" : "POST";
-    message += "\nArguments: ";
-    message += server.args();
-    message += "\n";
-
-    for (uint8_t i = 0; i < server.args(); i++) {
-      message += " " + server.argName(i) + ": " + server.arg(i) + "\n";
-    }
-
-    server.send(404, "text/plain", message);
-  }
-}
-
-void handleGenerate204() {
-  // Response for captive portal detection (Android/iOS)
-  //server.sendHeader("Location", "http://" + WiFi.softAPIP().toString(), true);
-  server.sendHeader("Location", "http://192.168.4.1", true);
-  server.send(204, "text/plain", "");
-}
-
-
+// --- Setup Function ---
 void setup() {
-  initLEDs();
   Serial.begin(115200);
-
-  // ASCII Art Logo
   Serial.println();
-  Serial.println("====================================================");
+  Serial.println("=== Water Tank Monitor with RS232 Commands ===");
   Serial.println("Available commands: mac, read, benchmark, reset");
-  Serial.println("====================================================");
-  Serial.println(DEVICE_NAME);
+  Serial.println("===============================================");
 
   // Initialize sensor serial with optimized settings
   sensorSerial.begin(9600);
@@ -1882,15 +1225,16 @@ void setup() {
   EEPROM.begin(EEPROM_SIZE);
   loadConfig();
 
-  WiFi.mode(WIFI_AP_STA);
-  WiFi.softAP(DEVICE_NAME, "12345678");
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP("TankMonitor", "12345678");
   Serial.printf("AP IP: %s\n", WiFi.softAPIP().toString().c_str());
 
+  // Start the DNS server
   dnsServer.start(DNS_PORT, "*", WiFi.softAPIP());
 
   // OTA Setup
-  ArduinoOTA.setHostname(DEVICE_NAME);
-  ArduinoOTA.setPassword(OTA_PASSWORD);
+  ArduinoOTA.setHostname("TankMonitor");
+  ArduinoOTA.setPassword("TankMonitor123");  // Add password protection
 
   ArduinoOTA.onStart([]() {
     String type;
@@ -1922,22 +1266,20 @@ void setup() {
 
   ArduinoOTA.begin();
 
-  // Web Server Setup with Captive Portal
+  // Add mDNS for service discovery (at end of setup())
+  if (MDNS.begin("TankMonitor")) {
+    MDNS.addService("http", "tcp", 80);
+    MDNS.addService("ota", "tcp", 3232);
+    Serial.println("mDNS responder started");
+  }
+
+  // Web Server Setup
   server.on("/", handleRoot);
-  server.on("/wifi-setup", handleWiFiSetup);
   server.on("/config", handleConfig);
   server.on("/data", handleData);
-  server.on("/sensor-stats", handleSensorStats);
-  server.on("/benchmark", handleBenchmark);
-  server.on("/benchmark-status", handleBenchmarkStatus);
-  
-  // Captive portal handlers
-  server.on("/generate_204", handleGenerate204);  // Android
-  server.on("/hotspot-detect.html", handleRoot);  // Apple
-  server.on("/ncsi.txt", handleRoot);             // Microsoft
-  server.on("/connecttest.txt", handleRoot);      // Windows
-  server.on("/fwlink", handleRoot);               // Microsoft
-  server.onNotFound(handleNotFound);
+  server.on("/sensor-stats", handleSensorStats);  // New endpoint for sensor diagnostics
+  server.on("/benchmark", handleBenchmark);       // New benchmark endpoint
+  server.onNotFound(handleRoot);
   server.begin();
 
   // ESP-NOW Setup
@@ -1950,18 +1292,6 @@ void setup() {
   esp_now_set_self_role(ESP_NOW_ROLE_COMBO);
   esp_now_register_recv_cb(OnDataRecv);
 
-  // Load MAC from EEPROM
-  uint8_t storedMAC[6] = { 0 };
-  EEPROM.get(ADDR_WIFI_MAC, storedMAC);
-
-  // If we have a valid stored MAC, use it instead of the default
-  if (storedMAC[0] != 0 || storedMAC[1] != 0 || storedMAC[2] != 0 || storedMAC[3] != 0 || storedMAC[4] != 0 || storedMAC[5] != 0) {
-    memcpy(senderMAC, storedMAC, 6);
-    Serial.printf("Using stored peer MAC: %02X:%02X:%02X:%02X:%02X:%02X\n",
-                  senderMAC[0], senderMAC[1], senderMAC[2],
-                  senderMAC[3], senderMAC[4], senderMAC[5]);
-  }
-
   if (esp_now_add_peer(senderMAC, ESP_NOW_ROLE_COMBO, 1, NULL, 0) != 0) {
     Serial.println("{\"error\":\"Failed to add peer\"}");
     delay(1000);
@@ -1969,9 +1299,6 @@ void setup() {
   }
 
   Serial.printf("{\"status\":\"Ready\",\"calibration_cm\":%.1f}\n", calibration_mm / 10.0f);
-  if (readDistance(mm, cm)) {
-    updateMeasurements();
-  }
 
   // Initial sensor health check
   if (checkSensorHealth()) {
@@ -2003,22 +1330,19 @@ void setup() {
 
 // --- Optimized Main Loop ---
 void loop() {
-  benchmarkResults.running = false;
-  benchmarkResults.lastResults = "";
-  benchmarkResults.iterations = 0;
-
-  ArduinoOTA.handle();
-  server.handleClient();
-  //handleSerialInput();
-  dnsServer.processNextRequest();  // Process DNS requests for captive portal
-
   static unsigned long lastSensorCheck = 0;
   static unsigned long lastHealthCheck = 0;
   static bool sensorHealthy = true;
 
-  MDNS.update();  // Keep mDNS service running
-
   unsigned long currentTime = millis();
+
+  // Handle serial commands (high priority)
+  handleSerialInput();
+
+  // Handle OTA and web server (high priority)
+  ArduinoOTA.handle();
+  server.handleClient();
+  dnsServer.processNextRequest();
 
   // Handle sensor readings optimally
   handleSensorReading();
@@ -2026,6 +1350,7 @@ void loop() {
   // Periodic sensor health check (every 30 seconds)
   if (currentTime - lastHealthCheck >= 30000) {
     bool currentHealth = checkSensorHealth();
+
     if (currentHealth != sensorHealthy) {
       sensorHealthy = currentHealth;
       Serial.printf("{\"sensor_health_changed\":\"%s\"}\n",
