@@ -1225,7 +1225,7 @@ void setup() {
   EEPROM.begin(EEPROM_SIZE);
   loadConfig();
 
-  WiFi.mode(WIFI_AP);
+  WiFi.mode(WIFI_STA); // must be STA for ESPNOW
   WiFi.softAP("TankMonitor", "12345678");
   Serial.printf("AP IP: %s\n", WiFi.softAPIP().toString().c_str());
 
