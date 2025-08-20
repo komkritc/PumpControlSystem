@@ -42,8 +42,15 @@
 #include <EEPROM.h>
 #include <ArduinoOTA.h>
 #include <DNSServer.h>
-#include <ESP8266mDNS.h>   // Add this line with the other includes
-#include <PubSubClient.h>  // MQTT client library
+#include <ESP8266mDNS.h>
+#include <PubSubClient.h>
+#include <WiFiUdp.h>
+#include <NTPClient.h>
+#include <time.h>
+
+
+WiFiUDP ntpUDP;
+NTPClient timeClient(ntpUDP, "pool.ntp.org", 7 * 3600);  // UTC+7 (Bangkok time)
 
 // --- Constants ---
 #define EEPROM_SIZE 128
@@ -56,7 +63,7 @@
 #define ADDR_WIFI_MAC 80   // 6 bytes for MAC address
 
 // --- Config Macros ---
-#define DEVICE_NAME "TankMonitor100"  // Device name (AP/mDNS/OTA)
+#define DEVICE_NAME "TankMonitor888"  // Device name (AP/mDNS/OTA)
 #define WIFI_AP_PASSWORD "12345678"   // AP mode password
 #define OTA_PASSWORD "12345678"       // OTA update password (optional)
 
@@ -72,6 +79,16 @@
 #define SERIAL_INPUT_TIMEOUT 5000      // ms
 #define UPDATE_INTERVAL 2000           // ms for web dashboard updates
 #define SERIAL_COMMAND_BUFFER_SIZE 32  // Buffer size for serial commands
+
+WiFiClient espClient;
+PubSubClient mqttClient(espClient);
+unsigned long lastMQTTConnectAttempt = 0;
+unsigned long lastMQTTPublish = 0;
+const char *mqttBroker = "test.mosquitto.org";
+int mqttPort = 1883;
+String mqttTopic = String(DEVICE_NAME) + "/status";
+bool wifiConnected = false;
+bool mqttConnected = false;
 
 const byte DNS_PORT = 53;  // DNS server port for captive portal
 
@@ -1168,6 +1185,7 @@ void handleConfig() {
 
 
 // Benchmarking Function (for web)
+
 void runSensorBenchmark(int iterations = 50) {
   Serial.println("{\"benchmark\":\"starting\"}");
   performanceMetrics.reset();
@@ -1181,13 +1199,13 @@ void runSensorBenchmark(int iterations = 50) {
     unsigned long endTime = micros();
 
     unsigned long readTime = endTime - startTime;
-    performanceMetrics.addMeasurement(readTime / 1000, success);  // Convert to milliseconds
+    performanceMetrics.addMeasurement(readTime / 1000, success);
 
     Serial.printf("{\"iteration\":%d,\"time_ms\":%lu,\"success\":%s,\"distance\":%.1f}\n",
                   i + 1, readTime / 1000, success ? "true" : "false",
                   success ? test_cm : 0.0f);
 
-    delay(100);  // Small delay between tests
+    delay(100);
   }
 
   Serial.printf("{\"benchmark_complete\":{\"success_rate\":%.1f,\"avg_time_ms\":%lu,\"min_time_ms\":%lu,\"max_time_ms\":%lu}}\n",
@@ -1197,19 +1215,184 @@ void runSensorBenchmark(int iterations = 50) {
                 performanceMetrics.maxReadTime);
 }
 
-// Benchmark endpoint handler
 void handleBenchmark() {
   if (server.hasArg("run")) {
     int iterations = server.hasArg("iterations") ? server.arg("iterations").toInt() : 20;
-    iterations = constrain(iterations, 5, 100);  // Limit range
+    iterations = constrain(iterations, 5, 30);  // Reduced max to 30 for stability
 
-    String response = "Benchmark running with " + String(iterations) + " iterations. Check serial output.";
-    server.send(200, "text/plain", response);
+    // Use String instead of large char arrays to prevent stack overflow
+    String html = String();
+    html.reserve(4000);  // Pre-allocate memory
 
-    // Run benchmark in background
-    runSensorBenchmark(iterations);
+    html += F(R"=====(
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Benchmark Results</title>
+    <style>
+        body { font-family: 'Segoe UI', sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; background-color: #f5f5f5; }
+        .card { background: white; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); padding: 25px; margin-top: 20px; }
+        h2 { color: #2c3e50; margin-top: 0; border-bottom: 1px solid #eee; padding-bottom: 10px; }
+        .summary { margin-bottom: 20px; }
+        .results-table { width: 100%; border-collapse: collapse; margin: 20px 0; font-size: 14px; }
+        .results-table th, .results-table td { padding: 8px 12px; text-align: left; border-bottom: 1px solid #ddd; }
+        .results-table th { background-color: #f8f9fa; font-weight: 600; }
+        .success { color: #4CAF50; }
+        .failure { color: #F44336; }
+        .progress-bar { height: 20px; background-color: #e0e0e0; border-radius: 10px; overflow: hidden; margin: 20px 0; }
+        .progress-fill { height: 100%; background-color: #4CAF50; width: 0%; transition: width 0.5s ease; }
+        .back-link { display: inline-block; margin-top: 20px; color: #3498db; text-decoration: none; }
+        .back-link:hover { text-decoration: underline; }
+        .toggle-results { background: none; border: none; color: #3498db; cursor: pointer; padding: 5px 0; }
+        .results-details { max-height: 300px; overflow-y: auto; border: 1px solid #eee; border-radius: 4px; padding: 10px; margin-top: 10px; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h2>Benchmark Results</h2>
+        
+        <div class="progress-bar">
+            <div class="progress-fill" id="progressFill"></div>
+        </div>
+        
+        <div class="summary">
+            <p><strong>Iterations:</strong> )=====");
+    html += iterations;
+    html += F(R"=====(</p>
+            <p><strong>Successful Readings:</strong> <span id="successCount">0</span></p>
+            <p><strong>Success Rate:</strong> <span id="successRate">0%</span></p>
+            <p><strong>Average Time:</strong> <span id="avgTime">0</span> ms</p>
+        </div>
+        
+        <button class="toggle-results" onclick="toggleDetails()">▼ Show Individual Readings</button>
+        
+        <div class="results-details" id="resultsDetails" style="display:none">
+            <table class="results-table">
+                <tr>
+                    <th>#</th>
+                    <th>Status</th>
+                    <th>Distance (cm)</th>
+                    <th>Time (ms)</th>
+                </tr>
+    )=====");
+
+    // Run benchmark in chunks to prevent memory issues
+    int successCount = 0;
+    unsigned long totalTime = 0;
+    unsigned long minTime = ULONG_MAX;
+    unsigned long maxTime = 0;
+    const int chunkSize = 5; // Process 5 iterations at a time
+    
+    for (int chunkStart = 0; chunkStart < iterations; chunkStart += chunkSize) {
+        int chunkEnd = min(chunkStart + chunkSize, iterations);
+        
+        for (int i = chunkStart; i < chunkEnd; i++) {
+            uint16_t test_mm;
+            float test_cm;
+
+            unsigned long startTime = micros();
+            bool success = readDistanceBurst(test_mm, test_cm, 1);
+            unsigned long endTime = micros();
+            unsigned long readTime = endTime - startTime;
+
+            // Add to HTML incrementally
+            html += F("<tr><td>");
+            html += i+1;
+            html += F("</td><td class='");
+            html += success ? F("success'>Success") : F("failure'>Failed");
+            html += F("</td><td>");
+            html += success ? String(test_cm, 1) : F("N/A");
+            html += F("</td><td>");
+            html += readTime / 1000.0, 1;
+            html += F("</td></tr>");
+
+            // Update stats
+            if (success) {
+                successCount++;
+                totalTime += readTime;
+                if (readTime < minTime) minTime = readTime;
+                if (readTime > maxTime) maxTime = readTime;
+            }
+
+            delay(50);
+            
+            // Periodically handle web requests to prevent watchdog timeout
+            if (i % 3 == 0) {
+                server.handleClient();
+                yield();
+            }
+        }
+        
+        // Free memory between chunks
+        ESP.wdtFeed();
+        yield();
+    }
+
+    float successRate = iterations > 0 ? (float)successCount / iterations * 100.0f : 0;
+    unsigned long avgTime = successCount > 0 ? totalTime / successCount : 0;
+
+    html += F(R"=====(
+            </table>
+        </div>
+        
+        <a href="/benchmark" class="back-link">← Run Another Benchmark</a>
+        <a href="/" class="back-link">← Back to Dashboard</a>
+    </div>
+    
+    <script>
+        // Update stats with final values
+        document.addEventListener('DOMContentLoaded', function() {
+            document.getElementById('successCount').textContent = ')=====");
+    html += successCount;
+    html += F(R"=====(';
+            document.getElementById('successRate').textContent = ')=====");
+    html += String(successRate, 1);
+    html += F(R"=====(%';
+            document.getElementById('avgTime').textContent = ')=====");
+    html += String(avgTime / 1000.0, 1);
+    html += F(R"=====(';
+            
+            const progressFill = document.getElementById('progressFill');
+            progressFill.style.width = ')=====");
+    html += String(successRate, 1);
+    html += F(R"=====(%';
+            
+            if ()=====");
+    html += successRate;
+    html += F(R"=====( < 50) {
+                progressFill.style.backgroundColor = '#F44336';
+                document.getElementById('successRate').style.color = '#F44336';
+            } else if ()=====");
+    html += successRate;
+    html += F(R"=====( < 80) {
+                progressFill.style.backgroundColor = '#FF9800';
+                document.getElementById('successRate').style.color = '#FF9800';
+            }
+        });
+        
+        function toggleDetails() {
+            const details = document.getElementById('resultsDetails');
+            const button = document.querySelector('.toggle-results');
+            if (details.style.display === 'none') {
+                details.style.display = 'block';
+                button.textContent = '▲ Hide Readings';
+            } else {
+                details.style.display = 'none';
+                button.textContent = '▼ Show Readings';
+            }
+        }
+    </script>
+</body>
+</html>
+)=====");
+
+    server.send(200, "text/html", html);
+    html = ""; // Free memory
   } else {
-    String html = R"=====(
+    // Show benchmark form (unchanged)
+    String html = F(R"=====(
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1217,98 +1400,38 @@ void handleBenchmark() {
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Sensor Benchmark</title>
     <style>
-        body {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            max-width: 800px;
-            margin: 0 auto;
-            padding: 20px;
-            color: #333;
-            line-height: 1.6;
-            background-color: #f5f5f5;
-        }
-        .card {
-            background: white;
-            border-radius: 8px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-            padding: 25px;
-            margin-top: 20px;
-        }
-        h2 {
-            color: #2c3e50;
-            margin-top: 0;
-            border-bottom: 1px solid #eee;
-            padding-bottom: 10px;
-        }
-        .form-group {
-            margin-bottom: 20px;
-        }
-        label {
-            display: block;
-            margin-bottom: 5px;
-            font-weight: 500;
-        }
-        input[type="number"] {
-            width: 100px;
-            padding: 8px;
-            border: 1px solid #ddd;
-            border-radius: 4px;
-        }
-        input[type="submit"] {
-            background-color: #3498db;
-            color: white;
-            border: none;
-            padding: 10px 20px;
-            border-radius: 4px;
-            cursor: pointer;
-            font-size: 16px;
-            transition: background-color 0.3s;
-        }
-        input[type="submit"]:hover {
-            background-color: #2980b9;
-        }
-        .info-box {
-            background-color: #f8f9fa;
-            border-left: 4px solid #3498db;
-            padding: 15px;
-            margin: 20px 0;
-        }
-        .back-link {
-            display: inline-block;
-            margin-top: 20px;
-            color: #3498db;
-            text-decoration: none;
-        }
-        .back-link:hover {
-            text-decoration: underline;
-        }
+        body { font-family: 'Segoe UI', sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; background-color: #f5f5f5; }
+        .card { background: white; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); padding: 25px; margin-top: 20px; }
+        h2 { color: #2c3e50; margin-top: 0; border-bottom: 1px solid #eee; padding-bottom: 10px; }
+        .form-group { margin-bottom: 20px; }
+        label { display: block; margin-bottom: 5px; font-weight: 500; }
+        input[type="number"] { width: 100px; padding: 8px; border: 1px solid #ddd; border-radius: 4px; }
+        input[type="submit"] { background-color: #3498db; color: white; border: none; padding: 10px 20px; border-radius: 4px; cursor: pointer; }
+        .info-box { background-color: #f8f9fa; border-left: 4px solid #3498db; padding: 15px; margin: 20px 0; }
+        .back-link { display: inline-block; margin-top: 20px; color: #3498db; text-decoration: none; }
+        .back-link:hover { text-decoration: underline; }
     </style>
 </head>
 <body>
     <div class="card">
-        <h2>Sensor Benchmark Tool</h2>
-        
-        <div class="form-group">
-            <form method="get">
-                <label for="iterations">Iteration Count (5-100):</label>
-                <input type="number" id="iterations" name="iterations" value="20" min="5" max="100">
-                
-                <input type="hidden" name="run" value="1">
-                <br><br>
-                <input type="submit" value="Start Benchmark">
-            </form>
-        </div>
-        
+        <h2>Sensor Benchmark</h2>
+        <form method="get">
+            <div class="form-group">
+                <label for="iterations">Iterations (5-30):</label>
+                <input type="number" id="iterations" name="iterations" value="20" min="5" max="30">
+            </div>
+            <input type="hidden" name="run" value="1">
+            <input type="submit" value="Start Benchmark">
+        </form>
         <div class="info-box">
-            <strong>Note:</strong> The benchmark will run with the specified number of iterations.
-            Results will be displayed in the serial monitor output.
-            Please don't navigate away during testing.
+            <strong>Note:</strong> Tests sensor response time and reliability.
+            For stability, maximum iterations limited to 30.
         </div>
-        
         <a href="/" class="back-link">← Back to Dashboard</a>
     </div>
 </body>
 </html>
-)=====";
+)=====");
 
     server.send(200, "text/html", html);
   }
@@ -1628,9 +1751,318 @@ void handleSensorReading() {
   handleESPNowRequest();
 }
 
+bool connectToMQTT() {
+  if (!mqttClient.connected()) {
+    String clientId = "TankMonitor-" + String(random(0xffff), HEX);
+    Serial.print("MQTT Connecting as: ");
+    Serial.println(clientId);
+
+    if (mqttClient.connect(clientId.c_str())) {
+      Serial.println("MQTT connected");
+      mqttConnected = true;
+      return true;
+    } else {
+      Serial.printf("MQTT connect failed, state: %d\n", mqttClient.state());
+      mqttConnected = false;
+      return false;
+    }
+  }
+  return true;
+}
+
+String getCustomTimestamp() {
+  timeClient.update();
+
+  // Get individual time components
+  int day = timeClient.getDay();
+  int hours = timeClient.getHours();
+  int minutes = timeClient.getMinutes();
+
+  // Get date components (month starts from 0)
+  time_t rawtime = timeClient.getEpochTime();
+  struct tm *ti;
+  ti = localtime(&rawtime);
+
+  char timestamp[20];
+  snprintf(timestamp, sizeof(timestamp),
+           "%02d-%02d-%04dT%02d:%02d",
+           ti->tm_mday,         // Day of month (1-31)
+           ti->tm_mon + 1,      // Month (0-11) + 1
+           ti->tm_year + 1900,  // Year (since 1900)
+           hours,
+           minutes);
+
+  return String(timestamp);
+}
+
+
+void publishMQTTStatus() {
+  if (!mqttClient.connected()) {
+    Serial.println("MQTT not connected, skip publish");
+    return;
+  }
+
+
+  String NTPDateTime = getCustomTimestamp();
+  // Build JSON payload
+  String payload = "{";
+  payload += "\"timestamp\":\"" + NTPDateTime + "\",";
+  payload += "\"device\":\"" + String(DEVICE_NAME) + "\",";
+
+  String macAddr = WiFi.macAddress();
+  macAddr.replace(":", "-");
+  payload += "\"mac\":\"" + macAddr + "\",";
+  payload += "\"distance_cm\":" + String(cm, 1) + ",";
+  payload += "\"level_percent\":" + String(percent, 1) + ",";
+  payload += "\"volume_liters\":" + String(volume, 1) + ",";
+  payload += "\"uptime\":\"" + formatRuntime(millis()) + "\",";
+  payload += "\"wifi_rssi\":" + String(WiFi.RSSI()) + ",";
+  payload += "\"sensor_valid_readings\":" + String(sensorManager.getValidReadingsCount());
+  payload += "}";
+
+  // Publish
+  if (mqttClient.publish(mqttTopic.c_str(), payload.c_str())) {
+    Serial.println("MQTT published: " + payload);
+    blinkRedLED(1);
+    blinkGreenLED(1);
+  } else {
+    Serial.println("MQTT publish failed");
+  }
+}
+
+bool connectToWiFi() {
+  char ssidBuf[32] = { 0 };
+  char passBuf[32] = { 0 };
+  EEPROM.get(ADDR_WIFI_SSID, ssidBuf);
+  EEPROM.get(ADDR_WIFI_PASS, passBuf);
+
+  String ssid = String(ssidBuf);
+  String password = String(passBuf);
+
+  if (ssid.length() == 0) {
+    Serial.println("{\"error\":\"No saved SSID\"}");
+    return false;
+  }
+
+  Serial.printf("Connecting to WiFi: %s\n", ssid.c_str());
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid.c_str(), password.c_str());
+
+  unsigned long startAttempt = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - startAttempt < 15000) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\nWiFi connected: " + WiFi.localIP().toString());
+    wifiConnected = true;
+    digitalWrite(LED_GREEN, LED_ON);
+    digitalWrite(LED_RED, LED_OFF);
+    blinkBlueLED(2);
+    return true;
+  } else {
+    Serial.println("\nWiFi connection failed → Starting AP mode");
+    WiFi.mode(WIFI_AP);
+    WiFi.softAP(DEVICE_NAME, WIFI_AP_PASSWORD);
+    Serial.printf("AP IP: %s\n", WiFi.softAPIP().toString().c_str());
+    digitalWrite(LED_RED, LED_ON);
+    return false;
+  }
+}
+
+bool reconnectMQTT() {
+  if (mqttClient.connected()) return true;
+
+  String clientId = "TankMonitor-" + String(random(0xFFFF), HEX);
+  Serial.print("Attempting MQTT connection as ");
+  Serial.println(clientId);
+
+  if (mqttClient.connect(clientId.c_str())) {
+    Serial.println("MQTT connected");
+    return true;
+  } else {
+    Serial.printf("MQTT connect failed, state: %d\n", mqttClient.state());
+    return false;
+  }
+}
+
+// void setup() {
+//   initLEDs();
+
+//   Serial.begin(115200);
+//   Serial.println();
+//   Serial.println("=== Water Tank Monitor with RS232 Commands ===");
+//   Serial.println("Available commands: mac, read, benchmark, reset");
+//   Serial.println("===============================================");
+//   Serial.println(DEVICE_NAME);
+//   Serial.println("===============================================");
+
+//   // Initialize sensor serial with optimized settings
+//   sensorSerial.begin(9600);
+//   sensorSerial.setTimeout(50);  // Reduced timeout for faster response
+
+//   EEPROM.begin(EEPROM_SIZE);
+//   loadConfig();
+
+//   // === WiFi & MQTT Setup ===
+//   if (!connectToWiFi()) {
+//     // Fallback to AP mode
+//     Serial.println("WiFi failed, starting AP mode");
+//     WiFi.mode(WIFI_STA);
+//     WiFi.softAP(DEVICE_NAME, WIFI_AP_PASSWORD);
+//     Serial.printf("AP IP: %s\n", WiFi.softAPIP().toString().c_str());
+//     blinkRedLED(3);
+//   } else {
+//     Serial.println("WiFi connected successfully");
+//     digitalWrite(LED_GREEN, LED_ON);
+//   }
+
+//   if (!connectToWiFi()) {
+//     Serial.println("Using AP mode with captive portal");
+//   } else {
+//     Serial.println("WiFi connected successfully");
+//     timeClient.begin();
+//     timeClient.setTimeOffset(7 * 3600);  // UTC+7 (Bangkok)
+//     String timestamp = getCustomTimestamp();
+//     Serial.print("Timestamp: ");
+//     Serial.println(timestamp);
+
+//     mqttClient.setServer(mqttBroker, mqttPort);
+//     mqttClient.setBufferSize(256);  // Ensure enough buffer for JSON
+//   }
+
+//   // Start DNS server for captive portal (works in both STA and AP)
+//   dnsServer.start(DNS_PORT, "*", WiFi.softAPIP() ? WiFi.softAPIP() : WiFi.localIP());
+
+//   // WiFi.mode(WIFI_STA);
+//   // Serial.printf("AP IP: %s\n", WiFi.softAPIP().toString().c_str());
+
+//   dnsServer.start(DNS_PORT, "*", WiFi.softAPIP());
+
+//   // OTA Setup
+//   ArduinoOTA.setHostname(DEVICE_NAME);
+//   ArduinoOTA.setPassword(OTA_PASSWORD);  // Add password protection
+
+//   ArduinoOTA.onStart([]() {
+//     String type;
+//     if (ArduinoOTA.getCommand() == U_FLASH) {
+//       type = "sketch";
+//     } else {  // U_SPIFFS
+//       type = "filesystem";
+//     }
+//     Serial.println("Start updating " + type);
+//   });
+
+//   ArduinoOTA.onEnd([]() {
+//     Serial.println("\nEnd");
+//   });
+
+//   ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+//     Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
+//   });
+
+//   ArduinoOTA.onError([](ota_error_t error) {
+//     Serial.printf("Error[%u]: ", error);
+//     if (error == OTA_AUTH_ERROR) Serial.println("Auth Failed");
+//     else if (error == OTA_BEGIN_ERROR) Serial.println("Begin Failed");
+//     else if (error == OTA_CONNECT_ERROR) Serial.println("Connect Failed");
+//     else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
+//     else if (error == OTA_END_ERROR) Serial.println("End Failed");
+//     ESP.restart();
+//   });
+
+//   ArduinoOTA.begin();
+//   Serial.print("OTA Update URL: http://");
+//   Serial.print(WiFi.localIP());
+//   Serial.println(":3232");
+
+//   // Add mDNS for service discovery
+//   if (MDNS.begin(DEVICE_NAME)) {
+//     MDNS.addService("http", "tcp", 80);
+//     MDNS.addService("ota", "tcp", 3232);
+//     Serial.println("mDNS responder started");
+//     Serial.print("Access at: http://");
+//     Serial.print(DEVICE_NAME);
+//     Serial.println(".local");
+//   }
+
+//   // Web Server Setup
+//   server.on("/", handleRoot);
+//   server.on("/wifi-setup", handleWiFiSetup);
+//   server.on("/config", handleConfig);
+//   server.on("/data", handleData);
+//   server.on("/sensor-stats", handleSensorStats);
+//   server.on("/benchmark", handleBenchmark);
+//   server.onNotFound(handleRoot);
+//   server.begin();
+
+//   // ESP-NOW Setup
+//   if (esp_now_init() != 0) {
+//     Serial.println("{\"error\":\"ESP-NOW init failed\"}");
+//     delay(1000);
+//     ESP.restart();
+//   }
+
+//   esp_now_set_self_role(ESP_NOW_ROLE_COMBO);
+//   esp_now_register_recv_cb(OnDataRecv);
+
+//   // Load MAC from EEPROM
+//   uint8_t storedMAC[6] = { 0 };
+//   EEPROM.get(ADDR_WIFI_MAC, storedMAC);
+
+//   // If we have a valid stored MAC, use it instead of the default
+//   if (storedMAC[0] != 0 || storedMAC[1] != 0 || storedMAC[2] != 0 || storedMAC[3] != 0 || storedMAC[4] != 0 || storedMAC[5] != 0) {
+//     memcpy(senderMAC, storedMAC, 6);
+//     Serial.printf("Using stored peer MAC: %02X:%02X:%02X:%02X:%02X:%02X\n",
+//                   senderMAC[0], senderMAC[1], senderMAC[2],
+//                   senderMAC[3], senderMAC[4], senderMAC[5]);
+//   }
+
+//   if (esp_now_add_peer(senderMAC, ESP_NOW_ROLE_COMBO, 1, NULL, 0) != 0) {
+//     Serial.println("{\"error\":\"Failed to add peer\"}");
+//     delay(1000);
+//     ESP.restart();
+//   }
+
+//   Serial.printf("{\"status\":\"Ready\",\"calibration_cm\":%.1f}\n", calibration_mm / 10.0f);
+//   if (readDistance(mm, cm)) {
+//     updateMeasurements();
+//   }
+
+//   // Initial sensor health check
+//   if (checkSensorHealth()) {
+//     Serial.println("{\"sensor\":\"healthy\"}");
+
+//     // Get initial stable reading (may take a few seconds)
+//     uint16_t init_mm;
+//     float init_cm;
+//     unsigned long initStart = millis();
+
+//     while (millis() - initStart < 10000) {  // Try for 10 seconds
+//       if (readDistance(init_mm, init_cm)) {
+//         mm = init_mm;
+//         cm = init_cm;
+//         updateMeasurements();
+//         Serial.printf("{\"initial_reading\":\"%.1f cm\"}\n", cm);
+//         break;
+//       }
+//       delay(100);
+//     }
+//   } else {
+//     Serial.println("{\"warning\":\"sensor_not_responding\"}");
+//   }
+
+//   // Initialize serial command buffer
+//   // serialBufferIndex = 0;
+//   // memset(serialCommandBuffer, 0, SERIAL_COMMAND_BUFFER_SIZE);
+//   blinkRedLED(2);
+//   blinkBlueLED(2);
+//   blinkGreenLED(2);
+// }
+
 void setup() {
   initLEDs();
-
   Serial.begin(115200);
   Serial.println();
   Serial.println("=== Water Tank Monitor with RS232 Commands ===");
@@ -1639,43 +2071,113 @@ void setup() {
   Serial.println(DEVICE_NAME);
   Serial.println("===============================================");
 
-  // Initialize sensor serial with optimized settings
-  sensorSerial.begin(9600);
-  sensorSerial.setTimeout(50);  // Reduced timeout for faster response
+  // === Check for D6 hold to force AP mode ===
+  pinMode(D6, INPUT_PULLUP);                    // Internal pull-up enabled
+  delay(10);                                    // Stabilization delay
+  bool forceAPMode = (digitalRead(D6) == LOW);  // LOW = button pressed
 
+  if (forceAPMode) {
+    Serial.println("D6 held on boot - Forcing AP mode for 10 minutes");
+
+    // Indicate forced AP mode
+    digitalWrite(LED_RED, LED_ON);
+
+    // Start in Access Point mode
+    WiFi.mode(WIFI_STA);
+    WiFi.softAP(DEVICE_NAME, WIFI_AP_PASSWORD);
+    IPAddress apIP = WiFi.softAPIP();
+    Serial.printf("AP Mode (Forced): %s\n", apIP.toString().c_str());
+
+    // Start DNS server for captive portal
+    dnsServer.start(DNS_PORT, "*", apIP);
+
+    // Setup web server routes
+    server.on("/", handleRoot);
+    server.on("/wifi-setup", handleWiFiSetup);
+    server.on("/config", handleConfig);
+    server.on("/data", handleData);
+    server.on("/sensor-stats", handleSensorStats);
+    server.on("/benchmark", handleBenchmark);
+    server.onNotFound(handleRoot);
+    server.begin();
+
+    // Start mDNS responder
+    if (MDNS.begin(DEVICE_NAME)) {
+      MDNS.addService("http", "tcp", 80);
+      Serial.println("mDNS responder started");
+      Serial.printf("Access at: http://%s.local\n", DEVICE_NAME);
+    }
+
+    unsigned long apStartTime = millis();
+    const unsigned long apDuration = 10 * 60 * 1000;  // 10 minutes
+
+    Serial.printf("AP mode will last for %.1f minutes\n", apDuration / 60000.0f);
+
+    // Blink red LED every 2 seconds to indicate forced AP
+    while (millis() - apStartTime < apDuration) {
+      ArduinoOTA.handle();
+      server.handleClient();
+      dnsServer.processNextRequest();
+      MDNS.update();
+      handleSensorReading();  // Keep sensor data fresh
+      yield();
+      delay(10);
+
+      // Blink LED every 2 seconds
+      if ((millis() / 1000) % 2 == 0) {
+        digitalWrite(LED_RED, HIGH);
+      } else {
+        digitalWrite(LED_RED, LOW);
+      }
+    }
+
+    Serial.println("AP mode timeout reached. Restarting to normal mode...");
+    delay(1000);
+    ESP.restart();
+  }
+
+  // === Normal Setup Continues Below ===
+  sensorSerial.begin(9600);
+  sensorSerial.setTimeout(50);
   EEPROM.begin(EEPROM_SIZE);
   loadConfig();
 
-  WiFi.mode(WIFI_STA);
-  WiFi.softAP(DEVICE_NAME, "12345678");
-  Serial.printf("AP IP: %s\n", WiFi.softAPIP().toString().c_str());
+  // Try normal Wi-Fi connection
+  if (!connectToWiFi()) {
+    Serial.println("WiFi failed, starting AP mode");
+    WiFi.mode(WIFI_AP);
+    WiFi.softAP(DEVICE_NAME, WIFI_AP_PASSWORD);
+    Serial.printf("AP IP: %s\n", WiFi.softAPIP().toString().c_str());
+    blinkRedLED(3);
+  } else {
+    Serial.println("WiFi connected successfully");
+    digitalWrite(LED_GREEN, LED_ON);
+    mqttClient.setServer(mqttBroker, mqttPort);
+    mqttClient.setKeepAlive(60); 
+    mqttClient.setBufferSize(256);  // Ensure enough buffer for JSON
+  }
 
-  dnsServer.start(DNS_PORT, "*", WiFi.softAPIP());
+  // Start DNS server (captive portal fallback)
+  IPAddress localIP = WiFi.localIP();
+  if (WiFi.getMode() == WIFI_AP || WiFi.status() != WL_CONNECTED) {
+    localIP = WiFi.softAPIP();
+  }
+  dnsServer.start(DNS_PORT, "*", localIP);
 
   // OTA Setup
   ArduinoOTA.setHostname(DEVICE_NAME);
-  ArduinoOTA.setPassword(OTA_PASSWORD);  // Add password protection
-
+  ArduinoOTA.setPassword(OTA_PASSWORD);
   ArduinoOTA.onStart([]() {
-    String type;
-    if (ArduinoOTA.getCommand() == U_FLASH) {
-      type = "sketch";
-    } else {  // U_SPIFFS
-      type = "filesystem";
-    }
-    Serial.println("Start updating " + type);
+    Serial.println("OTA Update Start");
   });
-
   ArduinoOTA.onEnd([]() {
-    Serial.println("\nEnd");
+    Serial.println("\nOTA Update End");
   });
-
   ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
-    Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
+    Serial.printf("OTA Progress: %d%%\r", (progress / (total / 100)));
   });
-
   ArduinoOTA.onError([](ota_error_t error) {
-    Serial.printf("Error[%u]: ", error);
+    Serial.printf("OTA Error[%u]: ", error);
     if (error == OTA_AUTH_ERROR) Serial.println("Auth Failed");
     else if (error == OTA_BEGIN_ERROR) Serial.println("Begin Failed");
     else if (error == OTA_CONNECT_ERROR) Serial.println("Connect Failed");
@@ -1683,13 +2185,13 @@ void setup() {
     else if (error == OTA_END_ERROR) Serial.println("End Failed");
     ESP.restart();
   });
-
   ArduinoOTA.begin();
+
   Serial.print("OTA Update URL: http://");
   Serial.print(WiFi.localIP());
   Serial.println(":3232");
 
-  // Add mDNS for service discovery
+  // mDNS Setup
   if (MDNS.begin(DEVICE_NAME)) {
     MDNS.addService("http", "tcp", 80);
     MDNS.addService("ota", "tcp", 3232);
@@ -1715,16 +2217,13 @@ void setup() {
     delay(1000);
     ESP.restart();
   }
-
   esp_now_set_self_role(ESP_NOW_ROLE_COMBO);
   esp_now_register_recv_cb(OnDataRecv);
 
   // Load MAC from EEPROM
   uint8_t storedMAC[6] = { 0 };
   EEPROM.get(ADDR_WIFI_MAC, storedMAC);
-
-  // If we have a valid stored MAC, use it instead of the default
-  if (storedMAC[0] != 0 || storedMAC[1] != 0 || storedMAC[2] != 0 || storedMAC[3] != 0 || storedMAC[4] != 0 || storedMAC[5] != 0) {
+  if (storedMAC[0] || storedMAC[1] || storedMAC[2] || storedMAC[3] || storedMAC[4] || storedMAC[5]) {
     memcpy(senderMAC, storedMAC, 6);
     Serial.printf("Using stored peer MAC: %02X:%02X:%02X:%02X:%02X:%02X\n",
                   senderMAC[0], senderMAC[1], senderMAC[2],
@@ -1738,20 +2237,19 @@ void setup() {
   }
 
   Serial.printf("{\"status\":\"Ready\",\"calibration_cm\":%.1f}\n", calibration_mm / 10.0f);
+
+  // Initial sensor reading
   if (readDistance(mm, cm)) {
     updateMeasurements();
   }
 
-  // Initial sensor health check
+  // Sensor health check
   if (checkSensorHealth()) {
     Serial.println("{\"sensor\":\"healthy\"}");
-
-    // Get initial stable reading (may take a few seconds)
     uint16_t init_mm;
     float init_cm;
     unsigned long initStart = millis();
-
-    while (millis() - initStart < 10000) {  // Try for 10 seconds
+    while (millis() - initStart < 10000) {
       if (readDistance(init_mm, init_cm)) {
         mm = init_mm;
         cm = init_cm;
@@ -1764,12 +2262,6 @@ void setup() {
   } else {
     Serial.println("{\"warning\":\"sensor_not_responding\"}");
   }
-
-  // Initialize serial command buffer
-  // serialBufferIndex = 0;
-  // memset(serialCommandBuffer, 0, SERIAL_COMMAND_BUFFER_SIZE);
-  blinkRedLED(2);
-  blinkBlueLED(2);
   blinkGreenLED(2);
 }
 
@@ -1777,46 +2269,61 @@ void setup() {
 void loop() {
   ArduinoOTA.handle();
   server.handleClient();
-  //handleSerialInput();
-  dnsServer.processNextRequest();  // Process DNS requests for captive portal
+  dnsServer.processNextRequest();
+  MDNS.update();
 
-  static unsigned long lastSensorCheck = 0;
-  static unsigned long lastHealthCheck = 0;
-  static bool sensorHealthy = true;
-
-  MDNS.update();  // Keep mDNS service running
-
-  unsigned long currentTime = millis();
-
-  // Handle sensor readings optimally
+  // Handle sensor readings
   handleSensorReading();
 
-  // Periodic sensor health check (every 30 seconds)
-  if (currentTime - lastHealthCheck >= 30000) {
-    bool currentHealth = checkSensorHealth();
+  // Handle time updates
+  timeClient.update();
 
-    if (currentHealth != sensorHealthy) {
-      sensorHealthy = currentHealth;
-      Serial.printf("{\"sensor_health_changed\":\"%s\"}\n",
-                    sensorHealthy ? "healthy" : "unhealthy");
+  // Reconnect WiFi if needed
+  if (WiFi.status() != WL_CONNECTED && !wifiConnected) {
+    if (millis() % 300000 < 100) {  // Try every 5mins
+      connectToWiFi();
+    }
+  }
 
-      if (!sensorHealthy) {
-        // Reset sensor manager if unhealthy
-        sensorManager.reset();
+  // Reconnect MQTT if needed
+  if (WiFi.status() == WL_CONNECTED) {
+    if (!mqttClient.connected()) {
+      reconnectMQTT();
+    } else {
+      // Publish every 30 seconds
+      mqttClient.loop();
+      static unsigned long lastPublish = 0;
+      if (millis() - lastPublish > 30000) {
+        publishMQTTStatus();
+        lastPublish = millis();
       }
     }
-
-    lastHealthCheck = currentTime;
   }
 
-  // Feed watchdog more frequently due to optimized loop
+
+
+  // Watchdog
   static unsigned long lastWdtFeed = 0;
-  if (currentTime - lastWdtFeed >= 50) {  // Feed every 50ms instead of 100ms
+  if (millis() - lastWdtFeed >= 50) {
     ESP.wdtFeed();
-    lastWdtFeed = currentTime;
+    lastWdtFeed = millis();
   }
 
-  // Small yield to prevent watchdog issues
   yield();
-  delay(10);  // Small delay to prevent WDT timeout
+  delay(10);
 }
+
+/*
+{
+  "timestamp": "2025-04-05T12:34:56+07:00",
+  "unix_timestamp": 1743824096,
+  "device": "TankMonitor100",
+  "mac": "5C-CF-7F-F5-3D-E1",
+  "distance_cm": 45.6,
+  "water_level_percent": 72.3,
+  "volume_liters": 412.5,
+  "uptime": "01:23:45",
+  "wifi_rssi": -67,
+  "sensor_valid_readings": 5
+}
+*/
