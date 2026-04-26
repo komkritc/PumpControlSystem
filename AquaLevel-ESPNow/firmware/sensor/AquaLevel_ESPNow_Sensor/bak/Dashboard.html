@@ -1,0 +1,408 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Tank Dashboard</title>
+
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+<style>
+.glass{
+  background:rgba(255,255,255,.55);
+  backdrop-filter:blur(10px);
+  border-radius:20px;
+  box-shadow:0 4px 20px rgba(0,0,0,.15)
+}
+.water{
+  position:absolute;bottom:0;width:100%;
+  background:linear-gradient(#4dabf7,#1c7ed6);
+  transition:height 1s ease
+}
+.sleeping-water {
+  background:linear-gradient(#adb5bd,#6c757d);
+}
+</style>
+</head>
+
+<body class="bg-gray-100 min-h-screen">
+
+<div class="w-full bg-white shadow px-4 py-4 flex justify-between sticky top-0 z-50">
+<h1 class="text-xl font-bold">📘 Tank Dashboard <span id="mqttStatus" class="text-xs px-2 py-1 rounded ml-3">Initializing...</span></h1>
+<div class="flex gap-4">
+<button onclick="openAddTankModal()" class="px-4 py-2 bg-blue-600 text-white rounded">+ Add Tank</button>
+<div>
+<p class="font-semibold">Tanks</p>
+<p id="tankCount" class="text-2xl font-bold text-blue-600">0</p>
+</div>
+</div>
+</div>
+
+<div class="p-6">
+<div id="tankGrid" class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-6"></div>
+</div>
+
+<div id="addModal" class="hidden fixed inset-0 bg-black bg-opacity-40 flex justify-center items-center z-50">
+<div class="glass w-96 p-6">
+<h2 class="text-xl font-bold mb-3">Add Tank</h2>
+<input id="tankName" class="w-full border rounded p-2 mb-3" placeholder="Tank name">
+<input id="tankTopic" class="w-full border rounded p-2 mb-3" placeholder="MQTT topic (e.g., Device1/status)">
+<div class="flex justify-end gap-3">
+<button onclick="closeAddTankModal()" class="px-3 py-2 bg-gray-300 rounded">Cancel</button>
+<button onclick="addTank()" class="px-3 py-2 bg-blue-600 text-white rounded">Add</button>
+</div>
+</div>
+</div>
+
+<script>
+let client; 
+let tanks={},tankCharts={},tankChartData={},tankChartLabels={},tankMaxVolume={};
+let tankLastActiveState = {}; // Track last known active state for each tank
+
+function parseThaiDate(s){
+ if(!s||s=="-")return null;
+ const[d,t]=s.split("T");const[dd,mm,yy]=d.split("-").map(Number);
+ return new Date(`${yy}-${mm}-${dd}T${t}:00`);
+}
+function formatCountdown(sec){
+ if(isNaN(sec)||sec<0)return "";
+ return `${Math.floor(sec/60)}m ${Math.floor(sec%60)}s`;
+}
+function updateCountdown(id,s,o){
+ const now=new Date();
+ document.getElementById(id+"_sleep_cd").innerText=s?formatCountdown((parseThaiDate(s)-now)/1000):"";
+ document.getElementById(id+"_online_cd").innerText=o?formatCountdown((parseThaiDate(o)-now)/1000):"";
+}
+
+// MODIFIED: Updated to return the status as a string for easier checking
+function updateStatus(id,b,s,o){
+ const el=document.getElementById(id+"_status");
+ const now=new Date();
+ const sl=parseThaiDate(s),on=parseThaiDate(o);
+ let status = "";
+ 
+ if(b<20) {
+   el.innerHTML=`<span class="bg-red-500 text-white px-2 py-1 rounded">LOW BATTERY</span>`;
+   status = "LOW_BATTERY";
+ }
+ else if(now<sl) {
+   el.innerHTML=`<span class="bg-green-600 text-white px-2 py-1 rounded">ACTIVE</span>`;
+   status = "ACTIVE";
+ }
+ else if(now<on) {
+   el.innerHTML=`<span class="bg-yellow-400 px-2 py-1 rounded">SLEEPING</span>`;
+   status = "SLEEPING";
+ }
+ else {
+   el.innerHTML=`<span class="bg-purple-600 text-white px-2 py-1 rounded">WAITING</span>`;
+   status = "WAITING";
+ }
+ 
+ return status;
+}
+
+// NEW: Check if tank is currently in active mode
+function isTankActive(id, battery, sleepTime, onlineTime) {
+    const now = new Date();
+    const sleep = parseThaiDate(sleepTime);
+    const online = parseThaiDate(onlineTime);
+    
+    // Check battery first
+    if (battery < 20) return false;
+    
+    // Active if current time is before sleep time
+    if (sleep && now < sleep) return true;
+    
+    // Not active if sleeping or waiting
+    return false;
+}
+
+function resetTankDisplay(id) {
+    document.getElementById(id+"_level").innerText=0;
+    document.getElementById(id+"_vol").innerText=0;
+    document.getElementById(id+"_dist").innerText="-";
+    document.getElementById(id+"_bat").innerText="-";
+    document.getElementById(id+"_sleep").innerText="-";
+    document.getElementById(id+"_online").innerText="-";
+    document.getElementById(id+"_water").style.height="0%";
+    document.getElementById(id+"_sleep_cd").innerText="";
+    document.getElementById(id+"_online_cd").innerText="";
+    document.getElementById(id+"_status").innerHTML=`<span class="bg-gray-400 text-white px-2 py-1 rounded">CONNECTING...</span>`;
+}
+
+function setMqttStatus(text, color) {
+    const el = document.getElementById("mqttStatus");
+    el.innerText = text;
+    el.className = `text-xs px-2 py-1 rounded ml-3 ${color}`;
+}
+
+// MODIFIED: Added check for active mode before updating graph
+function handleMqttMessage(topic, msg) {
+    if (!tanks[topic]) return;
+    const t = tanks[topic];
+    let d;
+
+    try {
+        d = JSON.parse(msg.toString());
+    } catch (e) {
+        console.error(`Failed to parse JSON for topic ${topic}:`, e);
+        document.getElementById(t.id + "_status").innerHTML = `<span class="bg-red-400 text-white px-2 py-1 rounded">DATA ERROR</span>`;
+        return;
+    }
+
+    // Update basic display info regardless of status
+    document.getElementById(t.id+"_level").innerText=d.level_percent;
+    document.getElementById(t.id+"_vol").innerText=d.volume_liters;
+    document.getElementById(t.id+"_dist").innerText=d.distance_cm;
+    document.getElementById(t.id+"_bat").innerText=d.battery_percentage;
+    document.getElementById(t.id+"_sleep").innerText=d.next_sleep;
+    document.getElementById(t.id+"_online").innerText=d.next_online;
+
+    const status = updateStatus(t.id, d.battery_percentage, d.next_sleep, d.next_online);
+    updateCountdown(t.id, d.next_sleep, d.next_online);
+    
+    // NEW: Check if tank is active
+    const isActive = isTankActive(t.id, d.battery_percentage, d.next_sleep, d.next_online);
+    
+    // Update water level with different color for sleeping mode
+    const waterEl = document.getElementById(t.id+"_water");
+    waterEl.style.height = d.level_percent + "%";
+    if (isActive) {
+        waterEl.className = "water";
+    } else {
+        waterEl.className = "water sleeping-water";
+    }
+    
+    // NEW: Only update graph if tank is active
+    if (isActive) {
+        /* ===== AUTO Y-AXIS MAX ===== */
+        if(d.level_percent>0){
+          const est=d.volume_liters/(d.level_percent/100);
+          tankMaxVolume[topic]=Math.ceil(est/500)*500;
+        }
+
+        const yMax=tankMaxVolume[topic]||1000;
+
+        tankChartData[topic].push(d.volume_liters);
+        if(tankChartData[topic].length>60)tankChartData[topic].shift();
+
+        const mqttDate = parseThaiDate(d.timestamp);
+        const labelTime = mqttDate ? mqttDate.toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"}) : new Date().toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"});
+        tankChartLabels[topic].push(labelTime);
+
+        if(tankChartLabels[topic].length>60)tankChartLabels[topic].shift();
+
+        const c=tankCharts[topic];
+        if(c){
+          c.options.scales.y.max=yMax;
+          const low=d.level_percent<20;
+          c.data.datasets[0].borderColor=low?"#e03131":"#1c7ed6";
+          c.data.datasets[0].backgroundColor=low?"rgba(224,49,49,.15)":"rgba(28,126,214,.15)";
+          c.data.labels=tankChartLabels[topic];
+          c.data.datasets[0].data=tankChartData[topic];
+          c.update();
+        }
+        
+        // Track that tank was active
+        tankLastActiveState[topic] = true;
+    } else if (tankLastActiveState[topic]) {
+        // Tank was active before but now is sleeping
+        // Add a gap indicator to the chart
+        const c = tankCharts[topic];
+        if (c) {
+            tankChartData[topic].push(null); // Add null for gap
+            tankChartLabels[topic].push("SLEEPING");
+            if(tankChartData[topic].length>60)tankChartData[topic].shift();
+            if(tankChartLabels[topic].length>60)tankChartLabels[topic].shift();
+            
+            c.data.labels = tankChartLabels[topic];
+            c.data.datasets[0].data = tankChartData[topic];
+            c.update();
+        }
+        tankLastActiveState[topic] = false;
+    }
+}
+
+function setupMqttClient() {
+    setMqttStatus("Connecting...", "bg-yellow-500 text-white");
+    client = mqtt.connect("wss://test.mosquitto.org:8081/mqtt");
+
+    client.on("connect", () => {
+        setMqttStatus("Connected", "bg-green-600 text-white");
+        Object.values(tanks).forEach(t => {
+            client.subscribe(t.topic);
+            tankLastActiveState[t.topic] = false; // Initialize state
+        });
+    });
+
+    client.on("error", (err) => {
+        console.error("MQTT Error:", err);
+        setMqttStatus("Error", "bg-red-600 text-white");
+    });
+    
+    client.on("close", () => {
+        setMqttStatus("Disconnected", "bg-gray-500 text-white");
+    });
+    
+    client.on("offline", () => {
+        setMqttStatus("Offline", "bg-gray-500 text-white");
+    });
+
+    client.on("message", handleMqttMessage);
+}
+
+function reconnectMqtt() {
+    if (client && client.connected) {
+        client.end(true, setupMqttClient); 
+    } else {
+        setupMqttClient();
+    }
+}
+
+function createTankChart(id,topic){
+ if(tankCharts[topic]) tankCharts[topic].destroy(); 
+ 
+ tankCharts[topic]=new Chart(document.getElementById(id),{
+ type:"line",
+ data:{labels:[],datasets:[{label:"Volume (L)",data:[],fill:true,tension:.3,borderWidth:2}]},
+ options:{
+   responsive:true,
+   maintainAspectRatio:false,
+   scales:{y:{beginAtZero:true,max:1000}},
+   // NEW: Handle null data points (gaps during sleep)
+   spanGaps: true
+ }
+ });
+}
+
+function createTankCard(id,name,topic){
+return `
+<div class="glass p-5">
+<div class="flex justify-between">
+<h2 class="text-xl font-bold">${name}</h2>
+<button onclick="deleteTank('${topic}')" class="text-red-500">✖</button>
+</div>
+<p class="text-sm text-gray-500">${topic}</p>
+
+<div class="relative mx-auto w-32 h-48 border-4 rounded-xl overflow-hidden mt-2">
+<div id="${id}_water" class="water"></div>
+</div>
+
+<p class="text-center text-3xl font-bold mt-2 text-blue-600">
+<span id="${id}_level">0</span>% (<span id="${id}_vol">0</span> L)
+</p>
+
+<div class="h-32 mt-3"><canvas id="${id}_chart"></canvas></div>
+<div id="${id}_status" class="mt-2"></div>
+
+<div class="text-gray-700 mt-3 space-y-1">
+<p><b>Distance:</b> <span id="${id}_dist">-</span> cm</p>
+<p><b>Battery:</b> <span id="${id}_bat">-</span>%</p>
+<p><b>Next Sleep:</b> <span id="${id}_sleep">-</span>
+<span id="${id}_sleep_cd" class="text-blue-500 text-sm"></span></p>
+<p><b>Next Online:</b> <span id="${id}_online">-</span>
+<span id="${id}_online_cd" class="text-blue-500 text-sm"></span></p>
+</div>
+</div>`;
+}
+
+function renderTanks(){
+ tankGrid.innerHTML="";
+ 
+ Object.values(tanks).forEach(t=>tankGrid.innerHTML+=createTankCard(t.id,t.name,t.topic));
+ tankCount.innerText=Object.keys(tanks).length;
+ 
+ Object.values(tanks).forEach(t=>{
+  if (!tankChartData[t.topic]) tankChartData[t.topic]=[];
+  if (!tankChartLabels[t.topic]) tankChartLabels[t.topic]=[];
+  if (!tankMaxVolume[t.topic]) tankMaxVolume[t.topic]=1000;
+  if (!tankLastActiveState[t.topic]) tankLastActiveState[t.topic]=false;
+  
+  createTankChart(t.id+"_chart",t.topic);
+  resetTankDisplay(t.id); 
+ });
+}
+
+function saveTanks(){localStorage.setItem("tanks",JSON.stringify(tanks));}
+function loadTanks(){const s=localStorage.getItem("tanks");if(s)tanks=JSON.parse(s);}
+
+function createDefaultTankIfEmpty(){
+ if(Object.keys(tanks).length===0){
+  tanks["TankMonitor888/status"]={id:"tank_default",name:"Tank 1",topic:"TankMonitor888/status"};
+  saveTanks();
+ }
+}
+
+function addTank(){
+ if(!tankName.value||!tankTopic.value)return;
+ 
+ const topicRegex = /^[a-zA-Z0-9\/\-_]+$/;
+ if (!topicRegex.test(tankTopic.value)) {
+     alert("Invalid MQTT Topic. Please use only letters, numbers, hyphens, underscores, and forward slashes (/).");
+     return;
+ }
+
+ if(tanks[tankTopic.value]) {
+    alert("Tank with this MQTT topic already exists!");
+    closeAddTankModal();
+    return;
+ }
+ 
+ const newTankTopic = tankTopic.value;
+ tanks[newTankTopic]={id:"tank_"+Date.now(),name:tankName.value,topic:newTankTopic};
+ 
+ saveTanks();
+ renderTanks();
+ closeAddTankModal();
+
+ reconnectMqtt(); 
+}
+
+function deleteTank(topic){
+ const tankId = tanks[topic]?.id;
+ 
+ if(tankCharts[topic]) {
+     tankCharts[topic].destroy();
+     delete tankCharts[topic];
+ }
+ 
+ if (tankId) {
+     resetTankDisplay(tankId); 
+ }
+ 
+ delete tanks[topic];
+ delete tankChartData[topic];
+ delete tankChartLabels[topic];
+ delete tankMaxVolume[topic];
+ delete tankLastActiveState[topic];
+ 
+ saveTanks();
+ renderTanks();
+
+ reconnectMqtt(); 
+}
+
+function openAddTankModal(){
+    tankName.value = "";
+    tankTopic.value = "";
+    addModal.classList.remove("hidden");
+}
+
+function closeAddTankModal(){addModal.classList.add("hidden")}
+
+loadTanks();
+createDefaultTankIfEmpty();
+renderTanks();
+setupMqttClient();
+
+setInterval(()=>Object.values(tanks).forEach(t=>updateCountdown(
+ t.id,
+ document.getElementById(t.id+"_sleep")?.innerText,
+ document.getElementById(t.id+"_online")?.innerText
+)),1000);
+</script>
+</body>
+</html>

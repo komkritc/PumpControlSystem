@@ -1,0 +1,37 @@
+#######################################
+# Datatypes (KEYWORD1)
+#######################################
+
+SonoffS31	KEYWORD1
+
+#######################################
+# Methods and Functions (KEYWORD2)
+#######################################
+
+begin	KEYWORD2
+update	KEYWORD2
+
+setRelay	KEYWORD2
+getRelayState	KEYWORD2
+toggleRelay	KEYWORD2
+
+getVoltage	KEYWORD2
+getCurrent	KEYWORD2
+getPower	KEYWORD2
+getEnergy	KEYWORD2
+getPowerFactor	KEYWORD2
+getApparentPower	KEYWORD2
+
+resetEnergy	KEYWORD2
+
+setVoltageCalibration	KEYWORD2
+setCurrentCalibration	KEYWORD2
+setPowerCalibration	KEYWORD2
+enableAutoCalibration	KEYWORD2
+
+onPowerUpdate	KEYWORD2
+onRelayChange	KEYWORD2
+
+#######################################
+# Constants (LITERAL1) (optional)
+#######################################
